@@ -362,6 +362,136 @@ async function testOffline(browser, base) {
   await page.close();
 }
 
+// Capture feedback on the REAL camera path, with a synthetic camera device so the
+// shutter actually fires. Runs under an Android profile because that is the deployment
+// target. Vibration is Android-only (iOS Safari has never shipped navigator.vibrate),
+// which is exactly why the visual flash is the primary signal and buzz/click are extras.
+async function testCaptureFeedback(base) {
+  console.log('\n\x1b[1mCapture feedback (fake camera, Android profile)\x1b[0m');
+  const browser = await puppeteer.launch({
+    executablePath: CHROME, headless: !HEADFUL,
+    args: ['--no-sandbox', '--use-fake-device-for-media-stream',
+           '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required'],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.emulate({
+      viewport: { width: 412, height: 915, isMobile: true, hasTouch: true, deviceScaleFactor: 2.6 },
+      userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36',
+    });
+    await page.evaluateOnNewDocument(() => {
+      window.__vibes = [];
+      // Desktop Chrome does not implement the Vibration API, so define it to observe the
+      // call. This proves the app ASKS to vibrate; only a physical handset can prove the
+      // motor runs.
+      Object.defineProperty(navigator, 'vibrate', {
+        configurable: true, value: p => { window.__vibes.push(p); return true; },
+      });
+      window.__audioNodes = 0;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) {
+        const orig = AC.prototype.createBufferSource;
+        AC.prototype.createBufferSource = function () { window.__audioNodes++; return orig.call(this); };
+      }
+    });
+    await page.goto(`${base}/index.html`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof window.setReagent === 'function');
+    await page.waitForFunction(() => {
+      const v = document.getElementById('cam');
+      return window.camStream && v && v.videoWidth > 0;
+    }, { timeout: 15000 }).catch(() => {});
+
+    const cam = await page.evaluate(() => ({
+      stream: !!window.camStream,
+      w: document.getElementById('cam').videoWidth,
+    }));
+    check('camera starts and delivers frames', cam.stream && cam.w > 0,
+      `stream=${cam.stream} videoWidth=${cam.w}`);
+
+    // A real tap on the viewfinder, dispatched through the touch/mouse stack.
+    await page.evaluate(() => document.getElementById('camWrap').scrollIntoView());
+    await page.tap('#camWrap');
+    await page.waitForFunction(() => window.__audioNodes > 0 || window.__vibes.length > 0,
+      { timeout: 5000 }).catch(() => {});
+
+    const fb = await page.evaluate(() => ({
+      vibes: window.__vibes, nodes: window.__audioNodes,
+      ctx: window.audioCtx ? window.audioCtx.state : 'none',
+      flashed: document.getElementById('camFlash').classList.contains('go'),
+    }));
+    check('tap vibrates (Android)', fb.vibes.length > 0 && fb.vibes[0] === 18,
+      `vibrate calls: ${JSON.stringify(fb.vibes)}`);
+    check('tap synthesises the shutter click', fb.nodes >= 2,
+      `${fb.nodes} buffer sources created, AudioContext=${fb.ctx}`);
+    check('tap flashes the frame', fb.flashed, 'flash class not applied');
+    console.log(`       AudioContext state after tap: ${fb.ctx}`);
+  } finally { await browser.close(); }
+}
+
+// Sample details now sit next to Save, i.e. they are edited AFTER the shot. That only
+// works if editing them re-stamps the photo — otherwise the image would carry a
+// different site name from the record printed beside it.
+async function testLateDetailsRestamp(browser, base) {
+  console.log('\n\x1b[1mLate sample details\x1b[0m');
+  const page = await newPage(browser, base);
+  const input = await page.$('#photoInput');
+  await input.uploadFile(path.join(SAMPLES, 'dpd_0p5.png'));
+  await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
+
+  const before = await page.evaluate(() => ({
+    stamp: document.getElementById('stampCanvas').toDataURL().length,
+    site: window.lastReading.site, conc: window.lastReading.conc,
+  }));
+  check('a capture with no details still stamps', before.stamp > 1000, `${before.stamp} chars`);
+
+  await page.evaluate(() => {
+    document.getElementById('siteName').value = 'Ward 7 standpost — consumer tap';
+    rerender();
+  });
+  const after = await page.evaluate(() => ({
+    stamp: document.getElementById('stampCanvas').toDataURL().length,
+    site: window.lastReading.site,
+  }));
+  check('site typed after capture reaches the record', after.site.startsWith('Ward 7'), after.site);
+  check('site typed after capture re-stamps the photo', after.stamp !== before.stamp,
+    `stamp unchanged at ${after.stamp} chars — image would disagree with the record`);
+
+  // Dilution is the one detail that changes the NUMBER, so it must recompute, not rescale.
+  await page.evaluate(() => { document.getElementById('dilution').value = '2'; rerender(); });
+  const dil = await page.evaluate(() => window.lastReading.conc);
+  check('dilution set after capture recomputes the reading',
+    Math.abs(dil - before.conc * 2) < 0.01, `${before.conc} -> ${dil}, expected ~${(before.conc * 2).toFixed(3)}`);
+
+  // And it must be idempotent: re-rendering twice must not compound the factor.
+  await page.evaluate(() => { rerender(); rerender(); });
+  const again = await page.evaluate(() => window.lastReading.conc);
+  check('repeated rerender does not compound dilution', Math.abs(again - dil) < 1e-9,
+    `${dil} -> ${again}`);
+  await page.close();
+}
+
+// Layout: the procedure chips are a printed list, not a progress bar.
+async function testLayout(browser, base) {
+  console.log('\n\x1b[1mLayout\x1b[0m');
+  const page = await newPage(browser, base);
+  const st = await page.evaluate(() => {
+    const chips = [...document.querySelectorAll('#stepChips span')];
+    const card = el => { for (let n = el; n; n = n.parentElement) if (n.classList && n.classList.contains('card')) return n; };
+    const sameCardAsSave = id => card(document.getElementById(id)) === card(document.getElementById('saveBtn'));
+    return {
+      n: chips.length,
+      highlighted: chips.filter(c => c.className.includes('on')).map(c => c.textContent),
+      styles: [...new Set(chips.map(c => getComputedStyle(c).backgroundColor + '/' + getComputedStyle(c).color))],
+      detailsWithSave: ['siteName', 'temp', 'ph', 'dilution'].filter(sameCardAsSave),
+    };
+  });
+  check('no step chip is highlighted', st.highlighted.length === 0, `highlighted: ${st.highlighted}`);
+  check('all step chips render identically', st.styles.length === 1, `distinct styles: ${st.styles}`);
+  check('sample details sit in the same card as Save',
+    st.detailsWithSave.length === 4, `only ${st.detailsWithSave} moved`);
+  await page.close();
+}
+
 async function testGuards(browser, base) {
   console.log('\n\x1b[1mSafety guards\x1b[0m');
   const page = await newPage(browser, base);
@@ -458,6 +588,9 @@ async function testGuards(browser, base) {
     await testOffline(browser, base);
     await testControlsVisible(browser, base);
     await testViewfinderTap(browser, base);
+    await testCaptureFeedback(base);
+    await testLateDetailsRestamp(browser, base);
+    await testLayout(browser, base);
     await testCalibrationMatchesCode(browser, base);
     await testGuards(browser, base);
   } finally {

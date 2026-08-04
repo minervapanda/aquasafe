@@ -60,6 +60,7 @@ var OTO_CAL_NOTE = 'Provisional constant (±40%), reasoned from the DPD calibrat
 
 var reagentId = 'dpd', useId = 'drinking';
 var camStream = null, roiTimer = null, lastGeo = null, lastReading = null, lastResult = null;
+var lastCapture = null;   // frozen copy of the captured frame, for re-stamping
 
 // The app is used in both the US and India, so dates follow the device's REGION
 // (7/24/2026 vs 24/07/2026) — but the language is pinned to English and digits to
@@ -382,8 +383,11 @@ function syncReagentUI() {
   var rg = R(), u = U();
   $('sopBox').innerHTML = '<b>How to test — ' + rg.name + '</b><ol>' +
     rg.sop.map(function (s) { return '<li>' + s + '</li>'; }).join('') + '</ol>';
-  $('stepChips').innerHTML = rg.chips.map(function (c, i) {
-    return '<span' + (i === 0 ? ' class="on"' : '') + '>' + esc(c) + '</span>';
+  // Uniform, never highlighted. The chips are a printed procedure, not a progress
+  // indicator — nothing advances them, so marking step 1 "current" told every user they
+  // were at the start no matter where they actually were.
+  $('stepChips').innerHTML = rg.chips.map(function (c) {
+    return '<span>' + esc(c) + '</span>';
   }).join('');
   $('resultHeading').textContent = rg.speciesLabel;
   $('reagentNote').innerHTML = rg.id === 'dpd'
@@ -578,20 +582,33 @@ function loadPhoto(ev) {
 // Clear the result area AND the previous reading's save row — a rejected shot must
 // not leave a stale reading one tap away from the log.
 function clearResult(noteHtml) {
-  lastReading = null; lastResult = null;
+  lastReading = null; lastResult = null; lastCapture = null;
   $('clResult').innerHTML = '— <small style="font-size:18px;font-weight:400">mg/L</small>';
   $('clBand').style.display = 'none'; $('gaugePin').style.display = 'none';
   $('clSteps').innerHTML = ''; $('recordBlock').style.display = 'none';
   $('readingSummary').style.display = 'none'; $('saveBtn').style.display = 'none';
   $('otoCaution').style.display = 'none'; $('pdfNote').textContent = '';
+  $('saveHint').style.display = 'block';
   $('clNote').innerHTML = noteHtml;
 }
 function finishTest(s, srcEl, w, h) {
   var g = gateReasons(s);
   if (!g.ok) { clearResult(g.longMsg); return; }
+  // Freeze the captured frame into an offscreen canvas.
+  //
+  // Sample details are filled in AFTER the shot, so editing them has to re-stamp the
+  // photo or the image would carry a different site name from the record beside it. The
+  // stamp cannot be redrawn from the original source element: for a camera capture that
+  // is the live <video>, and re-reading it would silently stamp a LATER frame — a
+  // different photograph — onto the same reading.
+  var frame = document.createElement('canvas');
+  frame.width = w; frame.height = h;
+  frame.getContext('2d').drawImage(srcEl, 0, 0, w, h);
+  lastCapture = { frame: frame, w: w, h: h };
+
   var r = concFromChannel(s.sample, s.ref, dilutionFactor());
   renderResult(r, { s: s.sample, ref: s.ref });
-  stampImage(srcEl, w, h, r);
+  stampImage(frame, w, h, r);
 }
 function manualResult() {
   var v = parseFloat($('manualCl').value);
@@ -599,7 +616,16 @@ function manualResult() {
   renderResult({ conc: v, manual: true, adviseDil: false, overRange: false, extrapolated: false }, null);
   $('recordBlock').style.display = 'none';
 }
-function rerender() { if (lastResult) renderResult(lastResult.r, lastResult.px); }
+function rerender() {
+  if (!lastResult) return;
+  // Dilution changes the number itself, so recompute from the stored channel
+  // medians rather than rescaling an already-rounded result.
+  var r = lastResult.px && !lastResult.r.manual
+    ? concFromChannel(lastResult.px.s, lastResult.px.ref, dilutionFactor())
+    : lastResult.r;
+  renderResult(r, lastResult.px);
+  if (lastCapture) stampImage(lastCapture.frame, lastCapture.w, lastCapture.h, r);
+}
 
 function renderResult(r, px) {
   lastResult = { r: r, px: px };
@@ -723,6 +749,7 @@ function renderResult(r, px) {
     (cya !== null ? '  ·  CYA ' + fmt(cya, 0) + ' mg/L' : '') + hoclHTML;
 
   $('saveBtn').style.display = 'block';
+  $('saveHint').style.display = 'none';
   if (c.critical) triggerCritical();
 }
 
