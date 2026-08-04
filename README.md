@@ -157,8 +157,9 @@ and the actual PDF bytes.
 ```bash
 cd test
 npm install                 # puppeteer-core; uses your installed Chrome
-python3 gen_samples.py      # paints the sample vial images
+python3 gen_samples.py      # paints the sample vial images (seeded, reproducible)
 node run_e2e.js             # or --headful to watch
+node live_smoke.js          # same, against the deployed https site
 ```
 
 The DPD sample images are painted with the **measured** sRGB of the comparator card patches

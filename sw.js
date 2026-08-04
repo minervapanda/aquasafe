@@ -1,6 +1,6 @@
 // Aquasafe service worker — offline-first for the app shell.
 // BUMP CACHE on every deploy, or phones keep serving the old bundle.
-var CACHE = 'aquasafe-v1';
+var CACHE = 'aquasafe-v2';
 var SHELL = ['./', './index.html', './aquasafe.js', './pdf.js',
              './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
