@@ -300,6 +300,68 @@ async function testViewfinderTap(browser, base) {
   await page.close();
 }
 
+// The whole point of the app is a field worker with no signal, so the report has to be
+// produced with the network genuinely off — not merely "no CDN in the markup". This
+// installs the service worker, cuts the network, reloads from cache, and runs a full
+// capture-to-PDF cycle offline.
+async function testOffline(browser, base) {
+  console.log('\n\x1b[1mOffline\x1b[0m');
+  const page = await browser.newPage();
+  await page.goto(`${base}/index.html`, { waitUntil: 'networkidle2' });
+  const swReady = await page.evaluate(() =>
+    navigator.serviceWorker.ready.then(r => !!r.active).catch(() => false));
+  check('service worker installs', swReady, 'no active worker');
+
+  await page.setOfflineMode(true);
+  const offlineReqs = [];
+  page.on('request', r => offlineReqs.push(r.url()));
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const shell = await page.evaluate(() => ({
+    app: typeof window.setReagent === 'function',
+    pdf: typeof window.AquasafePDF === 'object',
+    title: document.title,
+  }));
+  check('app shell loads from cache with the network off', shell.app && shell.pdf,
+    `app=${shell.app} pdf=${shell.pdf} title="${shell.title}"`);
+  if (!shell.app) { await page.close(); return; }
+
+  await page.evaluate(CAPTURE_DOWNLOADS);
+  await page.evaluate(() => { setReagent('dpd'); setUse('drinking');
+    document.getElementById('siteName').value = 'Offline field check';
+    document.getElementById('ph').value = '7.4'; });
+  const input = await page.$('#photoInput');
+  await input.uploadFile(path.join(SAMPLES, 'dpd_0p5.png'));
+  await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
+  check('reading computed offline', await page.evaluate(() => window.lastReading.conc > 0), 'no reading');
+
+  await page.evaluate(() => downloadPDF());
+  await page.waitForFunction(() => window.__downloads.length > 0, { timeout: 8000 }).catch(() => {});
+  const dl = await page.evaluate(() => window.__downloads[0] || null);
+  check('PDF downloads offline', !!dl, await page.evaluate(() => document.getElementById('pdfNote').textContent));
+  if (dl) {
+    const buf = Buffer.from(dl.bytes);
+    check('offline PDF is valid', buf.slice(0, 8).toString() === '%PDF-1.4' &&
+      buf.slice(-6).toString().trim() === '%%EOF', `${buf.length} bytes`);
+    // The stamped photo is the part that could silently vanish: toDataURL throws if the
+    // canvas was tainted, and buildReportDoc swallows that to keep the report working.
+    check('offline PDF still embeds the stamped photo', buf.length > 20000,
+      `only ${buf.length} bytes — photo was dropped`);
+    fs.mkdirSync(ARTIFACTS, { recursive: true });
+    fs.writeFileSync(path.join(ARTIFACTS, 'offline-report.pdf'), buf);
+  }
+  // CSV too — the other export a field worker needs before reaching signal.
+  await page.evaluate(() => { saveReading(); window.__downloads = []; exportHistory(); });
+  await page.waitForFunction(() => window.__downloads.length > 0, { timeout: 5000 }).catch(() => {});
+  check('CSV exports offline', await page.evaluate(() => window.__downloads.length > 0), 'no CSV');
+
+  const external = offlineReqs.filter(u => !u.startsWith(base) && !u.startsWith('data:') && !u.startsWith('blob:'));
+  check('no external requests attempted while offline', external.length === 0, external.join(', '));
+
+  await page.setOfflineMode(false);
+  await page.close();
+}
+
 async function testGuards(browser, base) {
   console.log('\n\x1b[1mSafety guards\x1b[0m');
   const page = await newPage(browser, base);
@@ -393,6 +455,7 @@ async function testGuards(browser, base) {
     for (const m of manifest) await runSample(browser, base, m);
     await testPDF(browser, base);
     await testCSVandLog(browser, base);
+    await testOffline(browser, base);
     await testControlsVisible(browser, base);
     await testViewfinderTap(browser, base);
     await testCalibrationMatchesCode(browser, base);
