@@ -1,0 +1,140 @@
+{
+  "status": "PROVISIONAL \u2014 physically reasoned, NOT empirically fitted",
+  "k_oto_srgb": 4.0,
+  "domain": "gamma-encoded sRGB 8-bit medians (the same domain the DPD constant lives in)",
+  "uncertainty_pct": 40,
+  "bracket": [
+    2.9,
+    5.7
+  ],
+  "model": "total chlorine mg/L = k_oto_srgb * log10(B_white / B_sample) * dilution",
+  "why_not_fitted": [
+    "No standard and no classical source publishes an absorbance-per-mg/L or a molar",
+    "absorptivity for the o-tolidine yellow holoquinone. JIS K 0106:2010 Annex A,",
+    "IS 3025 (Part 26):1986, the Standard Methods lineage and every field kit all say the",
+    "same thing: construct a calibration curve. Four researchers searched independently and",
+    "none found a primary measurement. So this constant is a reasoned prior, not a fit.",
+    "Replace it using fit_oto_calibration.py before OTO mode leaves beta."
+  ],
+  "derivation": {
+    "method": "ratio to the shipped DPD constant, so every term that belongs to the photographic pipeline rather than to the dye (sRGB gamma, effective vial path length, exposure, illuminant, white-card geometry) cancels exactly",
+    "formula": "k_OTO = k_DPD * (eta_DPD * n_DPD * eps_DPD) / (eta_OTO * n_OTO * eps_OTO)",
+    "k_dpd": 3.778,
+    "k_dpd_check": "refit through origin from the six Chlor-Test card points: sum(A*c)/sum(A^2) = 0.516018/0.136583 = 3.7781 \u2014 confirms the shipped constant exactly",
+    "eps_dpd": "19930 M^-1 cm^-1 at 510 nm (Wurster radical cation; Bader, Sturzenegger & Hoigne, Water Research 22:1109, 1988)",
+    "n_dpd": "2 \u2014 HOCl is a 2-electron oxidant, the Wurster cation a 1-electron product, so 1 Cl2 makes 2 chromophores",
+    "eps_oto": "5.0e4 M^-1 cm^-1 at 438 nm \u2014 INFERRED, the load-bearing weakness. Scaled from TMB's diimine (same benzidine-diimine chromophore) eps_450 = 5.9e4 (Josephy, Eling & Mason, J. Biol. Chem. 257:3669, 1982), corrected down for weaker methyl donation and up ~1.4x for strong-acid enhancement. Honest bracket 3.5-7.0e4.",
+    "n_oto": "1 \u2014 o-tolidine to holoquinone is a 2-electron/2-proton change against a 2-electron oxidant",
+    "eta_dpd_green": 0.706,
+    "eta_oto_blue": 0.548,
+    "eta_note": "band-overlap efficiency from a spectral forward model over the Jiang et al. (2013) 28-camera sensitivity database. DPD's 510/553 nm double band sits under the CENTRE of the green channel; OTO's 438 nm peak sits 22 nm BELOW the blue channel's 460 nm peak, on its 421 nm half-power shoulder.",
+    "arithmetic": "3.778 * (0.706*2*19930) / (0.548*1*50000) = 3.778 * 1.027 = 3.88; on the 551 nm eps basis 4.09; central 3.98 -> ship 4.0",
+    "coincidence_warning": "The near-equality with DPD's 3.778 is genuine, not a copy-paste bug: OTO's larger eps is almost exactly cancelled by its 1:1 rather than 2:1 stoichiometry and its worse blue-channel overlap. Do not 'fix' it."
+  },
+  "corroboration": [
+    "Ratio calculation: 3.88 - 4.09",
+    "Independent spectral forward model (28 cameras x dye band x sRGB encode), which first reproduced k_DPD as 3.844 (1.7% error, R^2 0.997) before being pointed at OTO: 4.03 median camera, 4.32 +/- 0.61 mean",
+    "Beer-Lambert from scratch: 4.02 once the band-overlap factor is corrected from an assumed 0.9 to the measured 0.776"
+  ],
+  "range": {
+    "quantitative_mg_l": [
+      0.2,
+      1.0
+    ],
+    "camera_detection_floor_mg_l": 0.22,
+    "floor_rationale": "Measured against the app own yellow detector: below about 0.22 mg/L the OTO yellow is too faint for a camera to separate from white paper (it fails the (R-B)>30 test), so the app REFUSES rather than guessing. The synthesis proposed a 0.1-0.2 semi-quantitative band; that is achievable by eye against a comparator disc but NOT by this method, and claiming it would invite a fabricated reading at the exact concentration where a false pass is most dangerous. The floor and the quantitative lower bound coincide at ~0.2 mg/L, which is convenient but not engineered.",
+    "over_range_above_mg_l": 1.0,
+    "gate_rationale": "Gate on TRANSMITTANCE (sample/reference), not on the raw channel code and not on computed mg/L. Not mg/L, because the concentration at which the response flattens depends on absorptivity and path length, neither of which the app knows. Not the raw code either: an absolute floor of 125 fires at 0.32 mg/L against a dim reference and 1.24 mg/L against a bright one, a 4x swing driven purely by exposure. Saturation is a ratio phenomenon, so the gate must be a ratio. T = 0.56 is where the +/-15% accuracy ceiling lands across a wide sweep of absorptivity and path length; at k=4.0 it corresponds to 4.0*log10(1/0.56) = 1.01 mg/L.",
+    "gate_implied_ceiling": "At k=4.0 and B_white=223 the gate fires at 4.0*log10(223/125) = 1.005 mg/L. The app derives the published lower bound from the gate and the actual white reference of each photo, so the two can never drift apart.",
+    "transmittance_gate": 0.56
+  },
+  "why_it_saturates": {
+    "summary": "The blue channel does NOT bottom out at 0. It PLATEAUS, and a linear model built on it UNDER-REPORTS \u2014 the dangerous direction.",
+    "mechanism": "17.1% of the blue channel's response (7.5-31.7% across cameras, 30.4% for the one phone sensor) lies where the 438 nm holoquinone absorbs under 10% of its peak. That unabsorbed leak acts as a stray-light floor: simulated blue code at 10 mg/L is 66-119, never near 0.",
+    "error_curve": {
+      "0.5": "+11%",
+      "1.0": "-8%",
+      "2.0": "-34% (mobile -42%)",
+      "5.0": "-64% (mobile -72%)"
+    },
+    "not_gamma": "Proven spectral, not gamma: the same simulation in the linear domain with no gamma gives -34.4% at 2 mg/L vs -33.5% gamma-encoded. Linearising does not fix it.",
+    "do_not_reuse": "poolcheck.js RELIABLE_MAX = 3.0 is well beyond the OTO asymptote and must not be carried over."
+  },
+  "gamma": {
+    "verdict": "handled, and not the problem",
+    "detail": "sRGB is a near-exact power law, so a ratio of encoded values is the encoded ratio: A_app = A_true/gamma_eff, with gamma_eff constant within 2% (2.254 at A=0.05, 2.208 at A=0.6) from code 255 down to ~119. Gamma rescales k by ~2.2 and does not bend the line.",
+    "toe": "gamma_eff falls to 2.10 at code 100, 1.41 at 20, 1.0 below 10. The blue-code gate at 125 keeps the app out of the toe.",
+    "if_you_ever_linearise": "k would become 4.0/2.21 = 1.8. Shipping 4.0 against linearised values would over-report by 2.2x. Ship exactly one domain; never a runtime toggle.",
+    "identifiability": "An earlier draft claimed sRGB's 2.2 was 'recovered from your own photographs' because A_true/A_app = 0.562/0.2647 = 2.12. That is degenerate and has been removed. The quantity actually recovered is gamma/(eta_DPD * L_eff), which lands near 2.2 only because eta_DPD*L_eff = 0.706*1.47 happens to be ~1.04. Using the same eta with L = 1 cm the identical calculation 'recovers' 1.50. gamma, eta_DPD and L_eff are mutually unidentifiable from the card data. They cancel only in the ratio - which is the real reason to prefer the ratio, and is unaffected by dropping the claim."
+  },
+  "geometry_warning": "Valid only at the optical geometry of the DPD calibration (a printed comparator card photographed the same way). Scale by (L_calibration / L_user) for a different vial: Lovibond's Comparator 2000+ cell is 13.5 mm, a Nessler tube 113 mm \u2014 an 8.4x error between them.",
+  "chemistry_gates": {
+    "acid_variant_only": "This implements the classical ACID o-tolidine test (final pH 1-3), product = yellow holoquinone, lambda-max 435-440 nm. IS 3025 (Part 26):1986 codifies the STABILIZED NEUTRAL variant (pH 6.5-7.5) whose product is the BLUE meriquinone read at 625 nm \u2014 a blue-channel model reads near-zero on it and would report 'safe'.",
+    "hue_gate": "Compute absorbance in all three channels. Refuse when red absorbance is a meaningful fraction of blue: blue-green means under-acidified/expired/neutral reagent, orange-brown means over-oxidation by excess chlorine. Only a clean yellow is on the calibration."
+  },
+  "known_biases": [
+    "OTO reads low against reference methods even with perfect optics: ~90% of true for hypochlorite and inorganic chloramines, ~50% for organic chloramines and real chlorinated pool water",
+    "Nitrite false positive: 0.2 mg/L NO2-N fakes 0.03-0.05 mg/L chlorine over an hour",
+    "Iron(III) at long reaction times, and manganese, which no reagent modification fixes",
+    "Turbidity and raw-water colour, which the app cannot blank out the way the classical orthotolidine-arsenite procedure did",
+    "Cross-camera scatter in the constant is ~14%, roughly double DPD's ~8%",
+    "Sample should be below 20 C; precision degrades as temperature rises"
+  ],
+  "reaction_time": {
+    "free_chlorine_s": 15,
+    "total_chlorine_s": 300,
+    "read_window_s": [
+      270,
+      600
+    ],
+    "note": "Acid OTO read at under ~15 s approximates FREE chlorine; read at 5 min it is TOTAL. JIS restricts reading to 10 min because the colour keeps rising (still climbing hours later). A photo with no timing discipline measures neither quantity cleanly, which is why the app records elapsed time and says so when it was not recorded."
+  },
+  "acceptance_test": {
+    "b_white": 223,
+    "expected_blue_codes": {
+      "0.2": 199,
+      "0.5": 167,
+      "1.0": 125,
+      "1.2": 112
+    },
+    "note": "Real photographs should sit ABOVE these at the top end \u2014 that is the spectral leak. Landing far off at the LOW end means eps or the acid regime is wrong."
+  },
+  "next_steps_by_value": [
+    "One UV-Vis scan, 400-700 nm, of a 1.00 mg/L chlorine standard developed with the actual reagent in the actual vial. Pins eps, band FWHM and any meriquinone contamination at once, collapsing +/-40% to a few percent.",
+    "Empirical refit with fit_oto_calibration.py against a printed chloroscope card (closer optical analogue than Lovibond's coloured GLASS filters), fitting 0.15-1.25 mg/L only and extrapolating nothing.",
+    "Only then, the 2-parameter leak-corrected model on linearised values, which cut max error over 1-3 mg/L from ~49% to under 10% in simulation."
+  ],
+  "test_points_mg_l": [
+    0.25,
+    0.4,
+    0.6,
+    0.9
+  ],
+  "over_range_test_points_mg_l": [
+    1.5,
+    3.0
+  ],
+  "below_floor_test_points_mg_l": [
+    0.15
+  ],
+  "corroboration_CORRECTED": {
+    "claim_withdrawn": "An earlier draft claimed three independently converging routes (3.88-4.09, 4.03, 4.02). Adversarial review showed that is overstated and it has been withdrawn.",
+    "what_actually_holds": "ONE physical route: the ratio to the DPD fit. The other two are not independent of it.",
+    "route_2_not_independent": "The 28-camera forward model 'reproducing k_DPD as 3.844' required assuming the same effective path length the anchor already carries. It is the anchor re-expressed, not a check on it.",
+    "route_3_arithmetic_error": "The from-scratch Beer-Lambert route was reported as landing on 4.02 after 'correcting f to the measured 0.776'. That substitutes a RATIO where an ABSOLUTE belongs: in k = gamma/(eps*n*L*1.4103e-5*eta_OTO) the divisor is eta_OTO = 0.548, not eta_OTO/eta_DPD = 0.776. Executed correctly with the same inputs it gives 5.7, not 4.02. It appeared to agree only because the erroneous 0.776/0.548 = 1.416 stood in for a path length the route had omitted.",
+    "implied_path_length": "Backing L out of the anchor gives L_eff = 2.2/(3.778*1.4103e-5*0.706*2*19930) = 1.47 cm. This is NOT a measured bore; it is the effective path length implied by the Chlor-Test card fit. Any different vial must rescale k by L_calibration/L_user."
+  },
+  "adversarial_review": {
+    "verdict": "All three reviewers refuted the proposal as first stated. None asked for a different value of k; all three attacked the envelope around it. The changes below were made in response.",
+    "fatal_finding_fixed": "SEGMENTATION WAS CONFOUNDED WITH THE MEASURED AXIS. Selecting 'sample' pixels by a yellow hue test is selecting on the illuminant colour-temperature axis itself: under a warm cast, white card pixels satisfy the yellow test, join the sample population and drag its median onto the card. Simulation showed the reading FREEZING at ~0.18 mg/L across a true 0.30-0.75 mg/L range at a 20-code cast, with every quality gate still passing and the hue gate manufacturing the very A_B > A_G > A_R ordering it looks for. FIX: the reference is now chosen by brightness in the measuring channel alone (a chroma-free criterion), the frame is white-balanced by it, and the hue tests run on normalised values, making them cast-invariant.",
+    "gate_moved_to_transmittance": "The absolute blue-code gate at 125 was refuted as exposure-dependent: across the white levels the app already accepts it fires anywhere from 0.32 to 1.24 mg/L, a 4x swing. Saturation is a ratio phenomenon, so the gate is now on transmittance, sample/reference <= 0.56.",
+    "uncertainty_now_published": "The +/-40% bracket straddles the 0.2 mg/L adequacy threshold in BOTH directions - at the low end of the bracket a true 0.15 mg/L would display as 0.21 and appear to clear a line it does not clear. Every OTO reading is therefore published as an interval, never a bare number.",
+    "pool_warning_added": "The most dangerous real pool reads high on total chlorine and zero on free, all of it bound as chloramine; it smells strongly of chlorine and is not disinfected. OTO cannot distinguish it from a sanitized pool. Pool mode now names that failure explicitly.",
+    "clipped_reference_rejected": "A blown-out white card has lost its own value to saturation, so every ratio against it reads LOW. Now refused.",
+    "OPEN - not fixed in v1": {
+      "no_sample_blank": "The strongest remaining objection. Iron(III), tannin/humic colour and turbidity all attenuate blue preferentially, so they PASS the hue gate as legitimate yellow and can fabricate roughly 0.05-0.2 mg/L of apparent total chlorine on chlorine-free water - straddling the decision threshold, in exactly the raw handpump water a PHED/JJM user is testing. The classical orthotolidine-arsenite procedure blanked this out; this app cannot. The fix is a paired photograph of the same vial BEFORE reagent development, with A = log10(B_blank/B_developed), which also removes the vial and geometry terms. Deferred to v2 because it changes the capture workflow.",
+      "isp_colour_matrix": "Phone JPEG pipelines apply a 3x3 colour-correction matrix with large negative off-diagonals. For a neutral card the off-diagonals cancel; for a saturated yellow they do not, and the blue row is typically the most aggressive. This does not cancel in the DPD-to-OTO ratio and is not bounded by the +/-40% bracket, so the stated ~14% cross-camera scatter is an underestimate of unknown size.",
+      "temperature": "The classical method wants sample below 20 C, which is unsatisfiable in 30-35 C Indian surface water. The app records temperature but does not gate on it."
+    }
+  }
+}
