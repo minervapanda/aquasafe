@@ -241,6 +241,65 @@ async function testCalibrationMatchesCode(browser, base) {
   await page.close();
 }
 
+// A control whose text matches its own background is invisible but still passes every
+// functional test — the `.btn2 button` / `.rowbtn` specificity clash shipped exactly that
+// on the PDF button. Check contrast on every interactive control instead of any one fix.
+async function testControlsVisible(browser, base) {
+  console.log('\n\x1b[1mControl legibility\x1b[0m');
+  const page = await newPage(browser, base);
+  const input = await page.$('#photoInput');
+  await input.uploadFile(path.join(SAMPLES, 'dpd_0p5.png'));
+  await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
+  await page.evaluate(() => { saveReading(); setUse('pool'); });
+
+  const bad = await page.evaluate(() => {
+    // Walk up for the nearest non-transparent background, the way a viewer perceives it.
+    const bg = el => {
+      for (let n = el; n; n = n.parentElement) {
+        const c = getComputedStyle(n).backgroundColor;
+        const m = c.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/);
+        if (m && (m[4] === undefined || parseFloat(m[4]) > 0.05)) return [+m[1], +m[2], +m[3]];
+      }
+      return [255, 255, 255];
+    };
+    const lum = ([r, g, b]) => {
+      const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+      return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+    };
+    const out = [];
+    document.querySelectorAll('button, a.dl, .seg button, .rowbtn').forEach(el => {
+      if (!el.offsetParent || !el.textContent.trim()) return;
+      const c = getComputedStyle(el).color.match(/[\d.]+/g).map(Number);
+      const L1 = lum(c) + 0.05, L2 = lum(bg(el)) + 0.05;
+      const ratio = L1 > L2 ? L1 / L2 : L2 / L1;
+      if (ratio < 3) out.push({ text: el.textContent.trim().slice(0, 28), ratio: +ratio.toFixed(2) });
+    });
+    return out;
+  });
+  check('every visible control has legible contrast', bad.length === 0,
+    `below 3:1 -> ${JSON.stringify(bad)}`);
+  await page.close();
+}
+
+// "Touch the camera" is the universal capture gesture, and with no camera running it must
+// explain itself rather than analyse a blank frame as if it were a photograph.
+async function testViewfinderTap(browser, base) {
+  console.log('\n\x1b[1mViewfinder\x1b[0m');
+  const page = await newPage(browser, base);
+  const wired = await page.evaluate(() => !!document.getElementById('camWrap').getAttribute('onclick'));
+  check('tapping the viewfinder captures', wired, 'camWrap has no click handler');
+  // No camera in headless Chrome, so this is the real no-stream path.
+  await page.evaluate(() => document.getElementById('camWrap').click());
+  const st = await page.evaluate(() => ({
+    note: document.getElementById('clNote').textContent,
+    reading: window.lastReading, flash: !!document.getElementById('camFlash'),
+  }));
+  check('tap with no camera explains, never fabricates a reading',
+    st.reading === null && /camera not running/i.test(st.note), `note="${st.note.slice(0, 90)}"`);
+  check('a visual flash exists so feedback survives a muted phone', st.flash, 'no #camFlash');
+  await page.close();
+}
+
 async function testGuards(browser, base) {
   console.log('\n\x1b[1mSafety guards\x1b[0m');
   const page = await newPage(browser, base);
@@ -334,6 +393,8 @@ async function testGuards(browser, base) {
     for (const m of manifest) await runSample(browser, base, m);
     await testPDF(browser, base);
     await testCSVandLog(browser, base);
+    await testControlsVisible(browser, base);
+    await testViewfinderTap(browser, base);
     await testCalibrationMatchesCode(browser, base);
     await testGuards(browser, base);
   } finally {

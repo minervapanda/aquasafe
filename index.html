@@ -43,6 +43,12 @@
   .roi{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);width:34%;height:46%;
        border:3px solid #ffe08a;border-radius:14px;box-shadow:0 0 0 2000px rgba(0,0,0,.28);pointer-events:none}
   .roi.ok{border-color:#39d353}.roi.bad{border-color:#ff5a5a}
+  /* Capture feedback must not depend on sound: an iOS silent switch mutes Web Audio
+     outright, and a phone in a noisy field is no better. The frame flashes instead. */
+  .flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none}
+  .flash.go{animation:shot .32s ease-out}
+  @keyframes shot{0%{opacity:.85}100%{opacity:0}}
+  @media(prefers-reduced-motion:reduce){.flash.go{animation:none}}
   .roi-label{position:absolute;left:50%;top:8%;transform:translateX(-50%);color:#fff;font-size:12px;
        background:rgba(0,0,0,.55);padding:4px 10px;border-radius:20px;white-space:nowrap;pointer-events:none;
        max-width:92%;overflow:hidden;text-overflow:ellipsis}
@@ -55,6 +61,12 @@
   .btn2{display:flex;gap:10px;margin-top:12px}
   .btn2 button,.btn2 label{flex:1;text-align:center;padding:12px;border:1px solid var(--line);border-radius:9px;
        background:#fff;font-weight:600;cursor:pointer;font-size:14px;min-height:46px}
+  /* .btn2 button is (0,1,1) and was beating .rowbtn (0,1,0) on background while .rowbtn's
+     color:#fff still applied — white on white, an invisible button. Match the specificity
+     so a filled button inside a .btn2 row stays filled. .rowbtn.ghost was never affected
+     (it is (0,2,0) and already won), but spell it out here so the pair stays together. */
+  .btn2 button.rowbtn{background:var(--teal);color:#fff;border:none}
+  .btn2 button.rowbtn.ghost{background:#fff;color:var(--teal);border:1px solid var(--line)}
   .bigresult{font-size:46px;font-weight:800;text-align:center;margin:6px 0;color:var(--deep);line-height:1.1}
   .band{display:inline-block;padding:5px 14px;border-radius:20px;font-size:14px;font-weight:700}
   .band.ok{background:#d6f5d6;color:#15691b}.band.low{background:#ffe6c2;color:#8a4b00}
@@ -164,10 +176,14 @@
   <div class="card">
     <h2>2 · Photograph the vial</h2>
     <div class="stepchip" id="stepChips"></div>
-    <div class="cam-wrap" id="camWrap">
+    <!-- Tapping the viewfinder captures, as it does in every phone camera app. The
+         shutter circle below stays as the explicit control. -->
+    <div class="cam-wrap" id="camWrap" onclick="captureTest()" role="button" tabindex="0"
+         aria-label="Tap to capture">
       <video id="cam" playsinline autoplay muted></video>
       <div class="roi" id="roi"></div>
       <div class="roi-label" id="roiLabel">Align the vial · white background</div>
+      <div class="flash" id="camFlash" aria-hidden="true"></div>
     </div>
     <button class="shutter" id="shutter" onclick="captureTest()" aria-label="Capture test photo" disabled></button>
     <div class="note" id="camHint" style="text-align:center">Starting camera…</div>

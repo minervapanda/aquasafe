@@ -516,12 +516,22 @@ function gateReasons(s) {
 }
 
 // Camera-shutter click, synthesized so the app stays asset-free and works offline.
+// NOTE: audio is a bonus, never the only feedback. iOS mutes Web Audio outright when the
+// hardware silent switch is on — a native camera bypasses that with a system shutter
+// sound, a web app cannot — so shotFeedback() always flashes the frame as well.
 var audioCtx = null;
 function playShutterClick() {
   try {
     var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
     if (!audioCtx) audioCtx = new AC();
-    if (audioCtx.state === 'suspended') audioCtx.resume();
+    // resume() is async. Scheduling against a still-suspended context is what makes the
+    // FIRST tap silent while every later one works, so wait for it before scheduling.
+    if (audioCtx.state === 'suspended') { audioCtx.resume().then(emitClick, function () {}); return; }
+    emitClick();
+  } catch (e) { }   // audio is cosmetic — never let it block a reading
+}
+function emitClick() {
+  try {
     var t0 = audioCtx.currentTime, sr = audioCtx.sampleRate;
     [[0, 3800, 0.9], [0.055, 2600, 0.5]].forEach(function (p) {
       var len = Math.floor(sr * 0.03), buf = audioCtx.createBuffer(1, len, sr), d = buf.getChannelData(0);
@@ -535,10 +545,27 @@ function playShutterClick() {
   } catch (e) { }   // audio is cosmetic — never let it block a reading
 }
 
+// Fires from the shutter button AND from a tap on the viewfinder.
 function captureTest() {
-  var v = $('cam'); playShutterClick();
-  var w = v.videoWidth || 960, h = v.videoHeight || 1280;
+  var v = $('cam');
+  // The viewfinder tap bypasses the shutter's disabled state, so the no-camera case has
+  // to be handled here: drawing a video with no frames yields a blank canvas, which
+  // would be analysed as a real photograph.
+  if (!camStream || !v.videoWidth) {
+    clearResult('<b>Camera not running.</b> Allow camera access and tap ↻ Restart camera, or use 📁 Photo to pick an image, or enter the comparator-card reading below.');
+    return;
+  }
+  shotFeedback();
+  var w = v.videoWidth, h = v.videoHeight;
+  // Deliberately NOT gated on the shutter's disabled state: if the frame is unusable the
+  // user gets the specific reason from finishTest, which beats a tap that does nothing.
   finishTest(analyzeFrame(v, w, h), v, w, h);
+}
+function shotFeedback() {
+  playShutterClick();
+  var f = $('camFlash'); if (!f) return;
+  f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');   // restart the animation
+  if (navigator.vibrate) { try { navigator.vibrate(18); } catch (e) { } }
 }
 function loadPhoto(ev) {
   var f = ev.target.files[0]; if (!f) return;
