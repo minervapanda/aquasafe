@@ -61,6 +61,7 @@ var OTO_CAL_NOTE = 'Provisional constant (±40%), reasoned from the DPD calibrat
 var reagentId = 'dpd', useId = 'drinking';
 var camStream = null, roiTimer = null, lastGeo = null, lastReading = null, lastResult = null;
 var lastCapture = null;   // frozen copy of the captured frame, for re-stamping
+var criticalShown = false;
 
 // The app is used in both the US and India, so dates follow the device's REGION
 // (7/24/2026 vs 24/07/2026) — but the language is pinned to English and digits to
@@ -490,7 +491,13 @@ function checkROI() {
   var roi = $('roi'), lab = $('roiLabel'), sh = $('shutter');
   roi.className = 'roi ' + (g.ok ? 'ok' : 'bad');
   lab.textContent = g.ok ? (R().colourWord.charAt(0).toUpperCase() + R().colourWord.slice(1)) + ' detected — tap the shutter' : g.shortMsg;
-  sh.disabled = !g.ok;
+  // aria-disabled, never the disabled property: this runs on a 400ms interval, and
+  // disabling a FOCUSED element blurs it, so a keyboard or switch user could be thrown
+  // to the top of the document mid-capture. captureTest is deliberately not gated on it
+  // either (it explains the specific problem instead), so the property bought nothing.
+  sh.setAttribute('aria-disabled', g.ok ? 'false' : 'true');
+  sh.classList.toggle('off', !g.ok);
+  sh.setAttribute('aria-label', g.ok ? 'Capture test photo' : 'Capture test photo. ' + g.shortMsg);
 }
 // One gate used by BOTH the live preview and the photo-upload path, so an uploaded
 // photo can never bypass a check the live path applies.
@@ -550,13 +557,21 @@ function emitClick() {
 }
 
 // Fires from the shutter button AND from a tap on the viewfinder.
+var _lastShot = 0;
 function captureTest() {
+  // Rate limit. The viewfinder is a tap-anywhere target and a frustrated user on a
+  // refusing frame can exceed 3 taps/second, which is a photosensitivity threshold for
+  // a flash this large — and it also re-ran a full-resolution analysis per tap.
+  var now = Date.now();
+  if (now - _lastShot < 400) return;
+  _lastShot = now;
   var v = $('cam');
   // The viewfinder tap bypasses the shutter's disabled state, so the no-camera case has
   // to be handled here: drawing a video with no frames yields a blank canvas, which
   // would be analysed as a real photograph.
   if (!camStream || !v.videoWidth) {
     clearResult('<b>Camera not running.</b> Allow camera access and tap ↻ Restart camera, or use 📁 Photo to pick an image, or enter the comparator-card reading below.');
+    capRefused('The camera is not running');
     return;
   }
   shotFeedback();
@@ -567,9 +582,93 @@ function captureTest() {
 }
 function shotFeedback() {
   playShutterClick();
-  var f = $('camFlash'); if (!f) return;
-  f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');   // restart the animation
-  if (navigator.vibrate) { try { navigator.vibrate(18); } catch (e) { } }
+  var f = $('camFlash');
+  if (f) { f.classList.remove('go'); void f.offsetWidth; f.classList.add('go'); }  // restart the animation
+  // 35ms, not 18: navigator.vibrate drives the legacy full-amplitude path, and much of
+  // a very short request is spent spinning the motor up. Through a work glove at arm's
+  // length, 18ms often is not felt at all.
+  buzz(35);
+}
+// Each call REPLACES the pattern in progress, so an outcome buzz must be scheduled
+// after the capture tick rather than stacked onto it; under ~150ms apart the two fuse
+// into one perceived event anyway.
+function buzz(p) { if (navigator.vibrate) { try { navigator.vibrate(p); } catch (e) { } } }
+
+// ---------------------------------------------------------------------------
+// Capture confirmation strip
+// ---------------------------------------------------------------------------
+// Announcements go through #capLive, a permanently present visually-hidden region,
+// NOT the strip: toggling a live region out of display:none announces unreliably, and
+// the result card's own live region was removed so the same event is not read twice.
+function capSay(msg) {
+  var el = $('capLive'); if (!el) return;
+  // Clear first. Writing a string the node already holds produces no mutation, so two
+  // identical refusals in a row would be silent and the user would think it was ignored.
+  el.textContent = '';
+  setTimeout(function () { el.textContent = msg; }, 100);
+}
+function capHide() { var el = $('capStrip'); if (el) el.hidden = true; }
+function capThumb(src, w, h) {
+  var c = $('capThumb'); if (!c || !src) return;
+  var x = c.getContext('2d');
+  var sw = Math.min(w, h * 0.75), sh = sw / 0.75;      // widest 3:4 centre crop, never squeezed
+  x.clearRect(0, 0, c.width, c.height);
+  try { x.drawImage(src, (w - sw) / 2, (h - sh) / 2, sw, sh, 0, 0, c.width, c.height); } catch (e) { }
+}
+function capShow(state, mark, title, valHTML, sayHTML, actHTML, announce) {
+  var el = $('capStrip'); if (!el) return;
+  $('capMark').textContent = mark;
+  $('capTitle').textContent = title;
+  $('capVal').innerHTML = valHTML || '';
+  $('capVal').style.display = valHTML ? 'block' : 'none';
+  $('capSay').innerHTML = sayHTML || '';
+  var act = $('capAct');
+  act.innerHTML = actHTML || '';
+  act.style.display = actHTML ? 'block' : 'none';
+  el.hidden = false;
+  el.className = 'cap ' + state;
+  el.classList.remove('in'); void el.offsetWidth; el.classList.add('in');   // restart the entry
+  $('camHint').style.display = 'none';
+  if (announce) capSay(announce);
+}
+function capJump() {
+  var card = $('resultCard'); if (!card) return;
+  var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion:reduce)').matches;
+  var h = $('resultHeading');
+  h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true });
+  card.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+}
+// Refusals are the common case, not an error. Name the frame, never the person, and
+// separate the mechanical event from the analytical one.
+function capRefused(shortMsg) {
+  capShow('no', '—', 'No reading from this shot', '',
+    esc(shortMsg) + '<br><b>The photo was taken. Nothing was measured.</b>',
+    '', 'No reading from this shot. ' + shortMsg + '. The photo was taken, nothing was measured. Take it again.');
+  setTimeout(function () { buzz([60, 90, 60]); }, 180);
+}
+function capResult(r, rg, u, c) {
+  var over = r.overRange;
+  // SAFETY: an OTO success must not put a bare number above the fold. The full result
+  // card wraps every OTO figure in a provisional range and the total-vs-free caveat;
+  // repeating the number up here without them would quietly defeat that.
+  var isOto = rg.species === 'total';
+  var val = over
+    ? '<span style="font-weight:600">&gt;</span>' + fmt(r.conc, 2) + ' <small>mg/L</small>'
+    : (isOto ? fmt(r.concLo != null ? r.concLo : r.conc, 2) + '–' + fmt(r.concHi != null ? r.concHi : r.conc, 2) +
+               ' <small>mg/L</small>'
+             : fmt(r.conc, 2) + ' <small>mg/L</small>');
+  var say = over
+    ? 'The colour has saturated, so the true value is higher than this. Dilute 1:1, set <b>Dilution</b> in step 3, and photograph again.'
+    : (isOto ? '<b>Total</b> chlorine, provisional range · OTO. This does <b>not</b> confirm free chlorine — see the full result.'
+             : esc(rg.speciesLabel) + ' · ' + esc(rg.name) + '. Full result and guidance are in the card below.');
+  var spoken = over
+    ? 'Over range. More than ' + fmt(r.conc, 2) + ' milligrams per litre. The true value is higher. Dilute the sample and test again.'
+    : (isOto ? 'Reading taken. Total chlorine, between ' + fmt(r.concLo, 2) + ' and ' + fmt(r.concHi, 2) +
+               ' milligrams per litre. This does not confirm free chlorine.'
+             : 'Reading taken. ' + fmt(r.conc, 2) + ' milligrams per litre ' + rg.speciesLabel.toLowerCase() + '. ' + c.label + '.');
+  capShow(over ? 'over' : 'ok', over ? '▲' : '✓',
+    over ? 'Above what this test can measure' : 'Photo read',
+    val, say, 'See the full result <span class="cap-arw">▾</span>', spoken);
 }
 function loadPhoto(ev) {
   var f = ev.target.files[0]; if (!f) return;
@@ -583,6 +682,7 @@ function loadPhoto(ev) {
 // not leave a stale reading one tap away from the log.
 function clearResult(noteHtml) {
   lastReading = null; lastResult = null; lastCapture = null;
+  capHide();
   $('clResult').innerHTML = '— <small style="font-size:18px;font-weight:400">mg/L</small>';
   $('clBand').style.display = 'none'; $('gaugePin').style.display = 'none';
   $('clSteps').innerHTML = ''; $('recordBlock').style.display = 'none';
@@ -593,7 +693,12 @@ function clearResult(noteHtml) {
 }
 function finishTest(s, srcEl, w, h) {
   var g = gateReasons(s);
-  if (!g.ok) { clearResult(g.longMsg); return; }
+  // Thumbnail BEFORE the gate, and synchronously: on a refusal the picture is the
+  // explanation — the user sees the glare or the missing white paper and understands
+  // without reading. It must be read now because for a camera capture srcEl is the live
+  // <video>, and a deferred read would grab a different frame.
+  capThumb(srcEl, w, h);
+  if (!g.ok) { clearResult(g.longMsg); capRefused(g.shortMsg); return; }
   // Freeze the captured frame into an offscreen canvas.
   //
   // Sample details are filled in AFTER the shot, so editing them has to re-stamp the
@@ -607,14 +712,20 @@ function finishTest(s, srcEl, w, h) {
   lastCapture = { frame: frame, w: w, h: h };
 
   var r = concFromChannel(s.sample, s.ref, dilutionFactor());
+  criticalShown = false;
   renderResult(r, { s: s.sample, ref: s.ref });
   stampImage(frame, w, h, r);
+  // Suppressed when the reading is critical: #critical takes focus immediately and
+  // would preempt the announcement. ackCritical shows the strip once dismissed.
+  if (!criticalShown) capResult(lastReading, R(), U(), classify(r.conc, R(), U(), r.overRange));
 }
 function manualResult() {
   var v = parseFloat($('manualCl').value);
   if (!(v >= 0)) { $('clNote').textContent = 'Enter the card reading in mg/L.'; return; }
+  criticalShown = false;
   renderResult({ conc: v, manual: true, adviseDil: false, overRange: false, extrapolated: false }, null);
   $('recordBlock').style.display = 'none';
+  capHide();   // a typed comparator reading is not a photo; the strip must not claim one
 }
 function rerender() {
   if (!lastResult) return;
@@ -750,7 +861,10 @@ function renderResult(r, px) {
 
   $('saveBtn').style.display = 'block';
   $('saveHint').style.display = 'none';
-  if (c.critical) triggerCritical();
+  // Once per CAPTURE, not once per render. rerender() runs on every keystroke in the
+  // sample-detail fields, and without this the alert re-opened and stole focus out of
+  // the text box on every character typed after a zero reading.
+  if (c.critical && !criticalShown) { criticalShown = true; triggerCritical(); }
 }
 
 // ---- pH advisory ----
@@ -1082,6 +1196,13 @@ function ackCritical() {
   $('critical').classList.remove('show');
   $('clNote').textContent = 'ZERO chlorine acknowledged at ' + new Date().toLocaleTimeString(APP_LOCALE) +
     '. Corrective action required — re-test after dosing.';
+  // ackCritical scrolls the shutter back into view, so card 2 must carry the outcome.
+  if (lastReading) {
+    capShow('no', '!', 'ZERO chlorine — no disinfection', '0.00 <small>mg/L</small>',
+      'Acknowledged. Dose the supply and test again.',
+      'See the full result <span class="cap-arw">▾</span>',
+      'Zero chlorine. No disinfection. Dose the supply and test again.');
+  }
   $('shutter').focus();
 }
 

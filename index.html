@@ -46,15 +46,66 @@
   /* Capture feedback must not depend on sound: an iOS silent switch mutes Web Audio
      outright, and a phone in a noisy field is no better. The frame flashes instead. */
   .flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none}
-  .flash.go{animation:shot .32s ease-out}
-  @keyframes shot{0%{opacity:.85}100%{opacity:0}}
+  .flash.go{animation:shot .24s ease-out}
+  /* .6 not .85: a large high-contrast white flash is a photosensitivity concern, and
+     captureTest is rate-limited to 400ms so it can never exceed ~2.5/s (WCAG 2.3.1). */
+  @keyframes shot{0%{opacity:.6}100%{opacity:0}}
   @media(prefers-reduced-motion:reduce){.flash.go{animation:none}}
+  .sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+       clip-path:inset(50%);white-space:nowrap;border:0}
+
+  /* --- capture confirmation, under the shutter ------------------------------
+     The page is long and the result renders two cards below the fold, so a capture
+     used to change something the user could not see. Three states that must be
+     told apart at arm's length in sun:
+       .ok    a reading exists
+       .over  a lower bound only — dilute and re-test
+       .no    the shutter fired but nothing was measurable — retake
+     REFUSED inverts to a dark block rather than turning red. Under glare, ambient
+     reflection adds a roughly constant luminance to both layers, which crushes
+     dark-on-light far worse than light-on-dark; and red is reserved for the one
+     genuine emergency (.critical, zero chlorine). Refusals here are normal, not
+     failures, so they must never read as an alarm or as the user's fault. */
+  .cap{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;align-items:start;margin-top:12px;
+       padding:12px;border:1px solid var(--line);border-left:6px solid var(--grey);border-radius:12px}
+  .cap[hidden]{display:none}
+  .cap.in{animation:capin .18s ease-out}
+  @keyframes capin{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+  .cap-thumb{grid-row:1/span 3;width:54px;height:72px;border-radius:8px;display:block;background:#0b1f24;
+       border:1px solid rgba(2,94,115,.35)}
+  .cap-head{display:flex;align-items:center;gap:8px;font-size:14.5px;font-weight:700;line-height:1.25;min-height:26px}
+  .cap-mark{flex:none;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;
+       font-size:15px;font-weight:700;line-height:1}
+  .cap-val{font-size:26px;font-weight:800;line-height:1.15;margin:3px 0 0}
+  .cap-val small{font-size:14px;font-weight:600}
+  .cap-say{font-size:12.5px;line-height:1.45;margin-top:3px}
+  .cap-act{grid-column:1/-1;margin-top:11px;width:100%;min-height:48px;padding:12px 14px;border:none;
+       border-radius:9px;font-size:14.5px;font-weight:700;cursor:pointer}
+  /* Three bobs then rest — a permanently moving arrow is noise on a screen someone
+     stares at all day, and WCAG 2.2.2 wants motion over 5s to be stoppable. */
+  .cap.in .cap-arw{display:inline-block;animation:capnudge 1.9s ease-in-out 3}
+  @keyframes capnudge{0%,58%,100%{transform:translateY(0)}72%{transform:translateY(3px)}86%{transform:translateY(1px)}}
+  @media(prefers-reduced-motion:reduce){.cap.in,.cap.in .cap-arw{animation:none}}
+  .cap.ok{background:#e6f6ea;border-color:#a8d9ae;border-left-color:var(--green);color:#2a4b53}
+  .cap.ok .cap-head{color:#14591c}.cap.ok .cap-mark{background:var(--green);color:#fff}
+  .cap.ok .cap-val{color:var(--deep)}.cap.ok .cap-act{background:var(--deep);color:#fff}
+  .cap.over{background:#fff5e0;border-color:#f0cf8a;border-left-color:var(--amber);color:#5c4200}
+  .cap.over .cap-head{color:#7a3d00}.cap.over .cap-mark{background:var(--amber);color:#4a2b00}
+  .cap.over .cap-val{color:#8a3b00}.cap.over .cap-act{background:var(--deep);color:#fff}
+  /* background-color separately from the gradient: the contrast test walks up for the
+     nearest non-transparent backgroundColor, and the `background` shorthand would
+     blank it, measuring this strip against the white card instead of itself. */
+  .cap.no{background-color:var(--deep);background-image:linear-gradient(135deg,#01455a,var(--deep));
+       border-color:#013e50;border-left-color:var(--aqua);color:var(--line)}
+  .cap.no .cap-head{color:#fff}.cap.no .cap-mark{background:#fff;color:var(--deep)}
+  .cap.no .cap-thumb{border-color:rgba(255,255,255,.6)}
+  .cap.no .cap-act{background:#fff;color:var(--deep)}
   .roi-label{position:absolute;left:50%;top:8%;transform:translateX(-50%);color:#fff;font-size:12px;
        background:rgba(0,0,0,.55);padding:4px 10px;border-radius:20px;white-space:nowrap;pointer-events:none;
        max-width:92%;overflow:hidden;text-overflow:ellipsis}
   .shutter{width:78px;height:78px;border-radius:50%;background:#fff;border:5px solid var(--teal);
        margin:14px auto 0;display:block;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.3)}
-  .shutter:disabled{opacity:.4;border-color:#999;cursor:not-allowed}
+  .shutter.off{opacity:.4;border-color:#999}
   .stepchip{display:flex;gap:6px;justify-content:center;margin:0 0 12px;flex-wrap:wrap}
   .stepchip span{font-size:11.5px;padding:5px 11px;border-radius:20px;background:var(--lgrey);color:var(--grey);font-weight:600}
   .stepchip span.on{background:var(--teal);color:#fff}
@@ -112,6 +163,7 @@
   <p>Chlorine field test — photograph the <b>DPD</b> or <b>OTO</b> vial, get mg/L and a PDF report</p>
 </header>
 <div class="wrap">
+  <p class="sr-only" id="capLive" role="status" aria-live="polite" aria-atomic="true"></p>
 
   <div class="card">
     <h2>1 · Reagent &amp; use</h2>
@@ -152,13 +204,26 @@
     <!-- Tapping the viewfinder captures, as it does in every phone camera app. The
          shutter circle below stays as the explicit control. -->
     <div class="cam-wrap" id="camWrap" onclick="captureTest()" role="button" tabindex="0"
-         aria-label="Tap to capture">
+         aria-label="Tap to capture"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();captureTest();}">
       <video id="cam" playsinline autoplay muted></video>
       <div class="roi" id="roi"></div>
       <div class="roi-label" id="roiLabel">Align the vial · white background</div>
       <div class="flash" id="camFlash" aria-hidden="true"></div>
     </div>
-    <button class="shutter" id="shutter" onclick="captureTest()" aria-label="Capture test photo" disabled></button>
+    <button class="shutter" id="shutter" onclick="captureTest()" aria-label="Capture test photo"></button>
+
+    <!-- Below the shutter, never above it: on a refusal the user must tap the same
+         control again, so it must not move. The strip is aria-hidden and announcements
+         go through #capLive, which is permanently in the DOM — toggling a live region
+         out of display:none announces unreliably. -->
+    <div class="cap" id="capStrip" hidden aria-hidden="true">
+      <canvas class="cap-thumb" id="capThumb" width="108" height="144"></canvas>
+      <div class="cap-head"><span class="cap-mark" id="capMark"></span><span id="capTitle"></span></div>
+      <div class="cap-val" id="capVal"></div>
+      <div class="cap-say" id="capSay"></div>
+      <button class="cap-act" id="capAct" type="button" onclick="capJump()"></button>
+    </div>
     <div class="note" id="camHint" style="text-align:center">Starting camera…</div>
     <div class="btn2">
       <button onclick="startCam()">↻ Restart camera</button>
@@ -172,9 +237,9 @@
     </div>
   </div>
 
-  <div class="card">
+  <div class="card" id="resultCard" style="scroll-margin-top:10px">
     <h2 id="resultHeading">Free chlorine</h2>
-    <div aria-live="polite" aria-atomic="true">
+    <div>
       <div class="bigresult" id="clResult">— <small style="font-size:18px;font-weight:400">mg/L</small></div>
       <div style="text-align:center"><span class="band" id="clBand" style="display:none"></span></div>
       <div class="gauge" id="gauge" aria-hidden="true"><div class="pin" id="gaugePin" style="left:0;display:none"></div></div>

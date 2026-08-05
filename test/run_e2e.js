@@ -419,7 +419,9 @@ async function testCaptureFeedback(base) {
       ctx: window.audioCtx ? window.audioCtx.state : 'none',
       flashed: document.getElementById('camFlash').classList.contains('go'),
     }));
-    check('tap vibrates (Android)', fb.vibes.length > 0 && fb.vibes[0] === 18,
+    // 35ms, not a token 18: much of a very short request is spent spinning the motor
+    // up, so through a glove at arm's length 18ms is often not felt.
+    check('tap vibrates perceptibly (Android)', fb.vibes.length > 0 && fb.vibes[0] >= 30,
       `vibrate calls: ${JSON.stringify(fb.vibes)}`);
     check('tap synthesises the shutter click', fb.nodes >= 2,
       `${fb.nodes} buffer sources created, AudioContext=${fb.ctx}`);
@@ -489,6 +491,156 @@ async function testLayout(browser, base) {
   check('all step chips render identically', st.styles.length === 1, `distinct styles: ${st.styles}`);
   check('sample details sit in the same card as Save',
     st.detailsWithSave.length === 4, `only ${st.detailsWithSave} moved`);
+  await page.close();
+}
+
+// The capture confirmation strip. The point of it is that a capture used to change
+// something two cards below the fold with nothing on screen saying so.
+async function testCaptureStrip(browser, base) {
+  console.log('\n\x1b[1mCapture confirmation\x1b[0m');
+  const read = p => p.evaluate(() => {
+    const el = document.getElementById('capStrip');
+    return {
+      hidden: el.hidden, cls: el.className,
+      title: document.getElementById('capTitle').textContent,
+      val: document.getElementById('capVal').textContent.trim(),
+      say: document.getElementById('capSay').textContent,
+      act: document.getElementById('capAct').textContent.trim(),
+      actShown: document.getElementById('capAct').style.display !== 'none',
+      live: document.getElementById('capLive').textContent,
+      thumbPainted: (() => {
+        const c = document.getElementById('capThumb');
+        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+        for (let i = 3; i < d.length; i += 4) if (d[i] > 0) return true;   // any non-transparent pixel
+        return false;
+      })(),
+    };
+  });
+
+  // 1. SUCCESS, DPD
+  let page = await newPage(browser, base);
+  let input = await page.$('#photoInput');
+  await input.uploadFile(path.join(SAMPLES, 'dpd_0p5.png'));
+  await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
+  await page.waitForFunction(() => document.getElementById('capLive').textContent.length > 0,
+    { timeout: 3000 }).catch(() => {});
+  let st = await read(page);
+  check('success: strip appears', !st.hidden && /\bok\b/.test(st.cls), `hidden=${st.hidden} cls=${st.cls}`);
+  check('success: shows the value', /0\.4[0-9]/.test(st.val), `val="${st.val}"`);
+  check('success: points to the full result', st.actShown && /full result/i.test(st.act), st.act);
+  check('success: thumbnail of the captured frame is painted', st.thumbPainted, 'canvas is blank');
+  check('success: announced to a screen reader', /reading taken/i.test(st.live), `live="${st.live}"`);
+  check('success: camera hint is hidden so two statuses cannot disagree',
+    await page.evaluate(() => document.getElementById('camHint').style.display === 'none'), 'camHint visible');
+  await page.close();
+
+  // 2. SUCCESS, OTO — must NOT put a bare number above the fold.
+  page = await newPage(browser, base);
+  await page.evaluate(() => setReagent('oto'));
+  input = await page.$('#photoInput');
+  await input.uploadFile(path.join(SAMPLES, 'oto_0p6.png'));
+  await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
+  st = await read(page);
+  const conc = await page.evaluate(() => fmt(window.lastReading.conc, 2));
+  check('OTO: strip shows a range, never the bare point value',
+    st.val.includes('–') && !new RegExp(`^${conc}\\s`).test(st.val), `val="${st.val}" point=${conc}`);
+  check('OTO: strip carries the not-free-chlorine caveat', /not.*confirm free chlorine/i.test(st.say),
+    st.say.slice(0, 90));
+  await page.close();
+
+  // 3. REFUSED — the shutter fired, nothing was measured. Must not read as success.
+  page = await newPage(browser, base);
+  input = await page.$('#photoInput');
+  await input.uploadFile(path.join(SAMPLES, 'gate_glare.png'));
+  await page.waitForFunction(() => !document.getElementById('capStrip').hidden, { timeout: 8000 }).catch(() => {});
+  st = await read(page);
+  check('refused: strip appears in the refused state', !st.hidden && /\bno\b/.test(st.cls), st.cls);
+  check('refused: shows no number at all', st.val === '', `val="${st.val}"`);
+  check('refused: separates the photo from the measurement',
+    /photo was taken/i.test(st.say) && /nothing was measured/i.test(st.say), st.say);
+  check('refused: no "see result" button — the shutter above is the retake', !st.actShown, st.act);
+  check('refused: never uses success language', !/\bok\b/.test(st.cls) && !/captured|success|✓/i.test(st.title),
+    `${st.cls} / ${st.title}`);
+  check('refused: thumbnail shows what the phone saw', st.thumbPainted, 'canvas is blank');
+  await page.close();
+
+  // 4. OVER RANGE
+  page = await newPage(browser, base);
+  await page.evaluate(() => setReagent('oto'));
+  input = await page.$('#photoInput');
+  await input.uploadFile(path.join(SAMPLES, 'oto_over_3p0.png'));
+  await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
+  st = await read(page);
+  check('over range: distinct state, shown as a bound', /\bover\b/.test(st.cls) && st.val.startsWith('>'),
+    `cls=${st.cls} val="${st.val}"`);
+  check('over range: tells the user to dilute', /dilut/i.test(st.say), st.say.slice(0, 80));
+  await page.close();
+
+  // 5. Staleness — a strip must never outlive its reading.
+  page = await newPage(browser, base);
+  input = await page.$('#photoInput');
+  await input.uploadFile(path.join(SAMPLES, 'dpd_0p5.png'));
+  await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
+  await page.evaluate(() => setReagent('oto'));
+  check('switching reagent clears the strip', (await read(page)).hidden, 'strip survived a reagent switch');
+  // A typed comparator reading is not a photograph.
+  await page.evaluate(() => { setReagent('dpd'); document.getElementById('manualCl').value = '0.5'; manualResult(); });
+  check('manual entry does not claim a photo was read', (await read(page)).hidden, 'strip shown for manual entry');
+  await page.close();
+}
+
+// Three defects the design review surfaced, all reproduced before fixing.
+async function testA11yRegressions(browser, base) {
+  console.log('\n\x1b[1mAccessibility regressions\x1b[0m');
+  const page = await newPage(browser, base);
+
+  // Typing in a sample field after a zero reading must not re-open the critical alert.
+  await page.evaluate(() => { document.getElementById('manualCl').value = '0'; manualResult(); ackCritical(); });
+  await page.evaluate(() => { document.getElementById('siteName').value = 'Ward 7'; rerender(); });
+  const crit = await page.evaluate(() => ({
+    shown: document.getElementById('critical').classList.contains('show'),
+    focus: document.activeElement.id,
+  }));
+  check('critical alert does not re-fire on every keystroke',
+    !crit.shown, `re-opened, focus stolen to "${crit.focus}"`);
+
+  // Disabling a focused element blurs it; checkROI runs every 400ms.
+  const sh = await page.evaluate(() => {
+    const s = document.getElementById('shutter');
+    s.focus(); const before = document.activeElement.id;
+    checkROI();
+    return { before, after: document.activeElement.id || '(body)', prop: s.disabled,
+             aria: s.getAttribute('aria-disabled') };
+  });
+  check('shutter uses aria-disabled and keeps focus', sh.after === 'shutter' && sh.prop === false,
+    `focus ${sh.before} -> ${sh.after}, disabled=${sh.prop}, aria-disabled=${sh.aria}`);
+
+  // role=button + tabindex with no key handler is unreachable by keyboard or switch.
+  const kb = await page.evaluate(async () => {
+    document.getElementById('camWrap').focus();
+    const before = document.getElementById('clNote').textContent;
+    document.getElementById('camWrap').dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await new Promise(r => setTimeout(r, 150));
+    return { before, after: document.getElementById('clNote').textContent };
+  });
+  check('viewfinder responds to Enter, not just tap', kb.after !== kb.before,
+    'Enter did nothing — keyboard and switch users cannot capture');
+
+  // Exactly one live region, or the same event is announced twice.
+  const live = await page.evaluate(() =>
+    [...document.querySelectorAll('[aria-live]')].map(e => e.id || e.tagName));
+  check('exactly one live region', live.length === 1 && live[0] === 'capLive', `found: ${live}`);
+
+  // Rate limit: a large white flash must not exceed ~3/s.
+  const rate = await page.evaluate(async () => {
+    let n = 0; const orig = window.shotFeedback;
+    window.shotFeedback = function () { n++; return orig.apply(this, arguments); };
+    for (let i = 0; i < 6; i++) { captureTest(); await new Promise(r => setTimeout(r, 30)); }
+    window.shotFeedback = orig; return n;
+  });
+  check('rapid taps are rate-limited below the flash threshold', rate <= 1,
+    `${rate} captures fired inside 180ms`);
   await page.close();
 }
 
@@ -591,6 +743,8 @@ async function testGuards(browser, base) {
     await testCaptureFeedback(base);
     await testLateDetailsRestamp(browser, base);
     await testLayout(browser, base);
+    await testCaptureStrip(browser, base);
+    await testA11yRegressions(browser, base);
     await testCalibrationMatchesCode(browser, base);
     await testGuards(browser, base);
   } finally {
