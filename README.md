@@ -163,6 +163,20 @@ operator is not a better constant but **their own comparator card**: photograph 
 To replace the prior with a real fit, `test/fit_oto_calibration.py` photographs an OTO
 comparator card and fits through the origin exactly as the DPD constant was fitted.
 
+### Combined chlorine — deliberately not built
+
+The DPD guide lists "automatically calculates Combined Chlorine when Free and Total
+Chlorine are tested" among the advantages of app-based testing. That refers to the
+**DPD No. 1 + DPD No. 3** pair — one chemistry, one calibration — which is how bench
+photometers do it and is perfectly sound. This app has no DPD No. 3 path, so the pair
+does not exist here.
+
+It must **never** be approximated by subtracting an OTO total from a DPD free. OTO
+recovers roughly 50–90 % of true, so that difference goes negative on samples that
+genuinely contain chloramine. And the OTO protocol already prescribes the right answer:
+where the free-versus-combined distinction matters, run DPD. The app says exactly that in
+its OTO caveat.
+
 ### Known gaps, not fixed in v1
 
 * **No sample blank.** Iron(III), tannin colour and turbidity all attenuate blue

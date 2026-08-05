@@ -177,5 +177,14 @@
   },
   "superseded": {
     "leak_corrected_model": "c = k(1-L)log10((1-L)/(T-L)), k=4.0, L=0.17 \u2014 replaced by the card lookup on 2026-08-04. Retained here because its physics reasoning is what predicted the plateau the linear model missed, and because it independently landed within 5% of the empirical k."
+  },
+  "decisions_closed": {
+    "combined_chlorine": {
+      "decision": "NOT built. Closed 2026-08-04. Do not re-raise.",
+      "what_the_document_actually_says": "DPD_Chlorine_Testing_Guide.pdf p.4, under the generic heading \"Key Advantages of Digital & App-Based Testing\": \"Automatically calculates Combined Chlorine (chloramines) when Free and Total Chlorine are tested.\" That document is titled \"Free Chlorine Testing with DPD\" and states on p.1 that DPD \"is the standard colorimetric reagent used to measure free AND TOTAL chlorine\". So the pair it means is DPD No.1 (free) and DPD No.3 (total) \u2014 one chemistry, one calibration, one instrument. Combined = total - free is valid there, and is how bench photometers do it.",
+      "my_error_withdrawn": "I read \"total chlorine\" and reached for the OTO path, because that is what this app uses for total, and proposed combined = OTO total - DPD free. That was my own construction, not the document's. I then argued against it on error-propagation grounds (OTO recovers 50-90% of true, so the difference goes NEGATIVE on samples that genuinely contain chloramine) and presented the conclusion as if it settled the guide's request. It did not; it answered a question nobody asked. Both the proposal and that reasoning are withdrawn.",
+      "why_not_built": "(1) The app has no DPD No.3 / total-chlorine path, so the pair the document means does not exist here. (2) The OTO field protocol addresses the free-vs-combined question directly and prescribes the better answer: \"For optimizing precise chemical dosing where the distinction between Free Residual Chlorine and Combined Chlorine is critical, the DPD method should be implemented.\" The app already says exactly this in its OTO caveat. (3) The product owner has closed it.",
+      "if_it_is_ever_revisited": "The only sound route is DPD No.3 support: a second reading on the same sample, same pink chemistry, same green channel, same 3.778 constant. Never subtract an OTO reading from a DPD one."
+    }
   }
 }
