@@ -12,6 +12,12 @@
     "why": "Real Indian distribution water is routinely dosed to 2-3 mg/L. If this frame ever goes back to reporting a bare lower bound, the tool is useless to the people it was built for.",
     "old_ceiling": ">1.01 mg/L",
     "operator_expects": 3.0,
-    "app_measures": "B_white 200, B_sample 46, T=0.23 -> 3.79 mg/L, interval 2.3-5.4+"
+    "app_measures": "T=0.23 -> 2.73 mg/L on the TWAD card, between the 2.0 and 3.0 patches"
+  },
+  {
+    "file": "twad-chlorine-card.jpeg",
+    "source": "The comparator card the team reads against: TWAD Board, Chennai-5, CHLORINE Chart - mg/L, steps 0.0/0.2/0.5/1.0/2.0/3.0, used with the Dentos-type orthotolidine reagent.",
+    "role": "CALIBRATION SOURCE, not a test fixture. The blue-channel medians of its six patches, ratioed against the 0.0 patch, ARE the OTO calibration in aquasafe.js (OTO_CARD_T). Kept in the repo so the calibration can be re-derived or re-photographed.",
+    "expect": "skip"
   }
 ]

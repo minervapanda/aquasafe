@@ -50,37 +50,29 @@ var OTO_FIT_MAX = 3.0;
 // Transmittance floor. B/B_white = 0.56 is where the +/-15% accuracy ceiling lands
 // across a wide sweep of absorptivity and path length, so it is the camera-robust form
 // of the same threshold. At k=4.0 it corresponds to 4.0*log10(1/0.56) = 1.01 mg/L.
-// The blue channel does NOT fall to zero on a strong yellow — it PLATEAUS, because
-// ~17% of the channel's response sits where the 438 nm holoquinone barely absorbs. That
-// unabsorbed leak acts as a stray-light floor, so a plain Beer model bends over and
-// under-reads badly above ~1 mg/L.
+// OTO is now calibrated against the card the team actually reads: the TWAD Board
+// (Chennai) "CHLORINE Chart - mg/L", six printed steps 0.0 / 0.2 / 0.5 / 1.0 / 2.0 / 3.0,
+// used with the Dentos-type orthotolidine field reagent.
 //
-// v1 handled that by refusing to print a number past the bend. A real capture from
-// Khordha, Odisha showed why that is not good enough: Indian distribution water is
-// routinely dosed to 2-3 mg/L, the app measured T=0.289 (a perfectly sound reading),
-// and reported only ">1.01" — useless to the operator.
+// Each entry is [mg/L printed on the patch, transmittance of that patch measured against
+// the 0.0 patch] — blue-channel medians from a photograph of the card, specular
+// highlights rejected. The 0.0 patch is the reference because zero chlorine is
+// transmittance 1 by definition, which is the same anchoring the DPD constant used.
 //
-// So the leak is now CORRECTED rather than fenced off:
-//     c = k(1-L) * log10((1-L)/(T-L))
-// The (1-L) on k re-normalises so the low range is unchanged (within 2% of the linear
-// model out to ~0.3 mg/L, where the constant was anchored) while the high range bends
-// back up. T -> L is the true asymptote: there the dye has absorbed everything it can
-// reach and no signal remains, which is where the gate now sits.
-var OTO_LEAK = 0.17;
-var OTO_SAT_T = 0.21;
-// Device spread on the leak, used for the published interval. The full 28-camera range
-// was 0.075-0.317; this is the central band. The extremes live in the calibration record.
-// 0.32, not 0.24: the 28-camera source database spans 0.075-0.317 and the single PHONE
-// sensor in it measured 0.304 — outside a 0.12-0.24 band. Phones are the device
-// population here, so the interval must reach them; it simply goes OPEN on those frames,
-// which states the uncertainty instead of hiding it.
-var OTO_LEAK_LO = 0.12, OTO_LEAK_HI = 0.32;
-// Both ends of the +/-40% bracket on k. The uncertainty straddles the 0.2 mg/L
-// adequacy threshold, so every OTO number is published as an interval rather than a
-// point: at the low end of the bracket a true 0.15 mg/L would display as 0.21 and
-// appear to clear a line it does not clear.
-var OTO_K_LO = 2.9, OTO_K_HI = 5.7;
-var OTO_CAL_NOTE = 'Provisional constant (±40%), reasoned from the DPD calibration rather than fitted, with a leak correction above ~1 mg/L — usable 0.2–3 mg/L, refused past ~4.4.';
+// Why a lookup and not a formula. Fitting Beer's law to these six points gives k = 4.212
+// — reassuringly close to the 4.0 that was reasoned from the DPD calibration — but only
+// R^2 = 0.90, with structure in the residuals: the printed 2.0 patch comes out at 1.34.
+// A fitted leak term collapses to zero. The card is a printer's visual match to the vial,
+// not a photometric series, so a physical model fitted to it is fitting ink choices. The
+// team's standard IS the card, so the app reads the card: interpolate between the printed
+// steps in absorbance space, and agree with it by construction.
+var OTO_CARD_T = [[0.0, 1.000], [0.2, 0.847], [0.5, 0.667], [1.0, 0.561], [2.0, 0.481], [3.0, 0.175]];
+var OTO_CARD_SOURCE = 'TWAD Board, Chennai — CHLORINE Chart (mg/L), orthotolidine';
+var OTO_FIT_MAX = 3.0;                       // the top printed step
+var OTO_SAT_T = OTO_CARD_T[OTO_CARD_T.length - 1][1];   // past the 3.0 patch, refuse a number
+// Kept only so the DPD-vs-OTO ratio derivation stays documented; not used to compute.
+var OTO_K = 4.0;
+var OTO_CAL_NOTE = 'Read against the TWAD Board chlorine chart, 0.2–3.0 mg/L.';
 
 // The visual scale in the PHED "Orthotolidine (OTO) Total Chlorine Method" standard
 // reference — the card the field operator is holding while they use this app. Reporting
@@ -88,28 +80,18 @@ var OTO_CAL_NOTE = 'Provisional constant (±40%), reasoned from the DPD calibrat
 // lets the operator cross-check the two in the field, which is the whole point of a
 // screening aid. Note the printed patches leave gaps (0.5-1.0, 1.5-2.0, 3.0-4.0, 5.0-10),
 // so a reading can legitimately fall between two patches and is reported that way.
-var OTO_CARD = [
-  { lo: 0.0, hi: 0.5, label: 'Clear / faint' },
-  { lo: 1.0, hi: 1.5, label: 'Light yellow' },
-  { lo: 2.0, hi: 3.0, label: 'Bright yellow' },
-  { lo: 4.0, hi: 5.0, label: 'Dark yellow' },
-  { lo: 10.0, hi: Infinity, label: 'Orange / brown' }
-];
 function otoCardBand(c) {
-  var i, b;
-  for (i = 0; i < OTO_CARD.length; i++) {
-    b = OTO_CARD[i];
-    if (c >= b.lo && c <= b.hi) {
-      return b.label + ' patch (' + b.lo + (isFinite(b.hi) ? '–' + b.hi : '+') + ' mg/L)';
+  var i;
+  for (i = 0; i < OTO_CARD_T.length; i++) {
+    if (Math.abs(c - OTO_CARD_T[i][0]) < 0.05) return 'the ' + OTO_CARD_T[i][0].toFixed(1) + ' patch';
+  }
+  for (i = 0; i < OTO_CARD_T.length - 1; i++) {
+    if (c > OTO_CARD_T[i][0] && c < OTO_CARD_T[i + 1][0]) {
+      return 'between the ' + OTO_CARD_T[i][0].toFixed(1) + ' and ' +
+             OTO_CARD_T[i + 1][0].toFixed(1) + ' patches';
     }
   }
-  for (i = 0; i < OTO_CARD.length - 1; i++) {
-    if (c > OTO_CARD[i].hi && c < OTO_CARD[i + 1].lo) {
-      return 'between the ' + OTO_CARD[i].label.toLowerCase() + ' and ' +
-             OTO_CARD[i + 1].label.toLowerCase() + ' patches';
-    }
-  }
-  return null;
+  return 'past the ' + OTO_CARD_T[OTO_CARD_T.length - 1][0].toFixed(1) + ' patch';
 }
 
 var reagentId = 'dpd', useId = 'drinking';
@@ -181,9 +163,7 @@ var REAGENTS = {
     get k() { return OTO_K; },
     get fitMax() { return OTO_FIT_MAX; },
     get satT() { return OTO_SAT_T; },
-    get leak() { return OTO_LEAK; },
-    get leakLo() { return OTO_LEAK_LO; },
-    get leakHi() { return OTO_LEAK_HI; },
+    card: true,                    // read off the TWAD chart rather than a formula
     segClass: 'yellowish',
     // yellow/amber: red and green both well above blue. Deep over-range samples run
     // orange to brown and still satisfy this — they are caught by the floor, not here.
@@ -294,7 +274,11 @@ function pickReagent(d, w, h) {
   if (pink < 50 && yellow < 50) return null;        // nothing coloured enough to be a vial
   if (pink >= 3 * yellow) return 'dpd';
   if (yellow >= 3 * pink) return 'oto';
-  return null;                                       // too close to call — do not guess
+  // There IS colour, but neither leads clearly. Never guess between the two: they are
+  // different chemistries measured on different channels, and picking the wrong one would
+  // report a confident number off the wrong scale. Distinguished from "no vial" so the
+  // operator is told what to actually do about it.
+  return 'tie';
 }
 // `commit` is false for the 400 ms live preview. The preview needs a reading to draw its
 // own feedback, but it must NEVER write the global reagent: that global is read again when
@@ -302,6 +286,11 @@ function pickReagent(d, w, h) {
 // operator typing the location could silently re-interpret a finished OTO result as DPD.
 function analyzeAuto(d, w, h, commit) {
   var prev = reagentId, pick = pickReagent(d, w, h);
+  if (pick === 'tie') {
+    var amb = analyzePixels(d);
+    amb.ambiguous = true;
+    return amb;
+  }
   if (pick) reagentId = pick;
   var out = analyzePixels(d);
   out.reagentId = reagentId;
@@ -460,11 +449,34 @@ function setDilution(f) {
 // of 125 fires at 0.32 mg/L against a dim reference and 1.24 mg/L against a bright one,
 // a 4x swing driven purely by exposure. Saturation is a ratio phenomenon, so the gate
 // has to be a ratio to be exposure-independent.
+// Absorbance of a card step, so interpolation happens on a roughly linear axis.
+function cardA(i) { return Math.log10(1 / OTO_CARD_T[i][1]); }
 function concFromT(T, rg, k, L) {
-  k = (k == null) ? rg.k : k;
-  L = (L == null) ? (rg.leak || 0) : L;
-  if (!L) return Math.max(0, k * Math.log10(1 / Math.max(T, 1e-6)));
-  return Math.max(0, k * (1 - L) * Math.log10((1 - L) / Math.max(T - L, 1e-6)));
+  rg = rg || R();
+  if (!rg.card) {
+    k = (k == null) ? rg.k : k;
+    return Math.max(0, k * Math.log10(1 / Math.max(T, 1e-6)));
+  }
+  // Straight-line interpolation between the printed steps, in absorbance.
+  var a = Math.log10(1 / Math.max(T, 1e-6)), i;
+  if (a <= 0) return 0;
+  for (i = 0; i < OTO_CARD_T.length - 1; i++) {
+    if (a <= cardA(i + 1)) {
+      var f = (a - cardA(i)) / (cardA(i + 1) - cardA(i));
+      return OTO_CARD_T[i][0] + f * (OTO_CARD_T[i + 1][0] - OTO_CARD_T[i][0]);
+    }
+  }
+  return OTO_CARD_T[OTO_CARD_T.length - 1][0];   // at or past the top step
+}
+// The two printed steps a reading sits between. This is the honest interval for a card
+// method: the operator's own card cannot resolve finer than its steps, and quoting a
+// modelled +/-40% band would imply a precision the printed scale does not have.
+function cardBracket(conc) {
+  var i;
+  for (i = 0; i < OTO_CARD_T.length - 1; i++) {
+    if (conc <= OTO_CARD_T[i + 1][0]) return [OTO_CARD_T[i][0], OTO_CARD_T[i + 1][0]];
+  }
+  return [OTO_CARD_T[OTO_CARD_T.length - 1][0], null];
 }
 function concFromChannel(sample, ref, dil, rg) {
   rg = rg || R();
@@ -489,19 +501,12 @@ function concFromChannel(sample, ref, dil, rg) {
 // device-dependent leak. Both widen sharply near the asymptote, which is the point —
 // a number quoted to two decimals at 3 mg/L would be false precision.
 function concInterval(T, rg, dil) {
-  if (!rg.leak) return null;                       // DPD is empirically fitted
-  var ks = [OTO_K_LO, rg.k, OTO_K_HI], Ls = [rg.leakLo, rg.leak, rg.leakHi];
-  var lo = Infinity, hi = 0, open = false;
-  for (var i = 0; i < ks.length; i++) for (var j = 0; j < Ls.length; j++) {
-    // A leak at or above the measured transmittance means that camera could not have
-    // produced this frame at any finite concentration — the upper bound is open.
-    if (T <= Ls[j] + 0.01) { open = true; continue; }
-    var c = concFromT(T, rg, ks[i], Ls[j]) * (dil || 1);
-    if (c < lo) lo = c;
-    if (c > hi) hi = c;
+  if (rg.card) {
+    var c = concFromT(T, rg) * (dil || 1), b = cardBracket(c / (dil || 1));
+    if (b[1] == null) return null;
+    return { lo: b[0] * (dil || 1), hi: b[1] * (dil || 1), open: false, card: true };
   }
-  if (!isFinite(lo)) return null;
-  return { lo: lo, hi: hi, open: open };
+  return null;                                     // DPD is empirically fitted
 }
 
 // ---------------------------------------------------------------------------
@@ -650,6 +655,8 @@ function gateReasons(s) {
     longMsg: '<b>No white reference.</b> Place the vial against plain white paper in even light and retake — a reading without a measured white reference is unreliable.' };
   if (s.clamped) return { ok: false, shortMsg: 'Reading not possible — retake',
     longMsg: '<b>The vial looks brighter than the paper.</b> The light is coming through the vial instead of off the paper, so nothing could be measured. Hold the white paper flat behind the vial, with the light on the paper, and take the photo again.' };
+  if (s.ambiguous) return { ok: false, shortMsg: 'Cannot tell pink from yellow — move closer',
+    longMsg: '<b>The app cannot tell which test this is.</b> A <b>pink</b> vial is a DPD test and a <b>yellow</b> vial is an OTO test, and they are read in different ways. Move closer so the vial fills the outline, keep plain white paper behind it, and take the photo again.' };
   if (!s.detected) {
     // There is no reagent to have got wrong any more, so there is one message: the app
     // could not find a coloured vial at all.
@@ -799,7 +806,7 @@ function capResult(r, rg, u, c) {
              : fmt(r.conc, 2) + ' <small>mg/L</small>');
   var say = over
     ? 'The colour is too dark to measure. Mix half sample with half clean water. Do the test again. Then tell the app you did this.'
-    : (isOto ? '<b>Total</b> chlorine · OTO' + (r.cardBand ? ' · PHED card: <b>' + esc(r.cardBand) + '</b>' : '') +
+    : (isOto ? '<b>Total</b> chlorine · OTO' + (r.cardBand ? ' · chart: <b>' + esc(r.cardBand) + '</b>' : '') +
                '. This does <b>not</b> confirm free chlorine — see the full result.'
              : esc(rg.speciesLabel) + ' · ' + esc(rg.name) + '. Full result and guidance are in the card below.');
   var spoken = over
@@ -921,7 +928,7 @@ function renderResult(r, px) {
     note = c.band === 'zero'
       ? 'No chlorine of any kind — see the alert.'
       : 'Total chlorine is ' + (r.overRange ? 'over ' : '') + fmt(r.conc, 2) + ' mg/L. Free (disinfecting) chlorine is somewhere between 0 and this value.' +
-        (cardBand ? ' On the PHED OTO card this is the ' + cardBand + ' — check it against the card in your hand.' : '');
+        (cardBand ? ' On your chlorine chart this is ' + cardBand + ' — check it against the card in your hand.' : '');
     if (c.band === 'high') note += ' This exceeds the ' + u.max + ' mg/L guideline for ' + u.label.toLowerCase() + ' — reduce dosing.';
   } else {
     note = { zero: 'No disinfection — see the alert.',
@@ -944,7 +951,7 @@ function renderResult(r, px) {
       '<br><br>This test <b>cannot show</b> that the water meets the ' +
       '0.2 mg/L drinking water rule' +
       ', because that rule is about free chlorine. Use a <b>DPD</b> test to check free chlorine.' +
-      '<br><br>This reading is close, not exact. Check it against your colour card.';
+      '<br><br>Check it against your chlorine chart.';
   } else { cau.style.display = 'none'; }
 
   // Active HOCl only means something for FREE chlorine; computing it from an OTO
@@ -991,7 +998,7 @@ function renderResult(r, px) {
   var sum = $('readingSummary'); sum.style.display = 'block';
   sum.innerHTML = '<b>Reading</b> — ' + esc(rg.speciesLabel) + ' <b>' + (r.overRange ? '&gt;' : '') +
     fmt(r.conc, 2) + ' mg/L</b>  ·  ' + esc(rg.name) + '  ·  ' + esc(u.label) +
-    (r.cardBand ? '<br>Colour card: <b>' + esc(r.cardBand) + '</b>' : '');
+    (r.cardBand ? '<br>On the chart: <b>' + esc(r.cardBand) + '</b>' : '');
 
   $('saveBtn').style.display = 'block';
   show('saveHint', false);
@@ -1238,7 +1245,7 @@ function buildReportDoc() {
   if (!r.manual && r.chSample != null) {
 
   }
-  if (r.cardBand) method.push(['PHED OTO card', r.cardBand]);
+  if (r.cardBand) method.push(['On the chlorine chart', r.cardBand]);
   method.push(['Dilution', r.dilution > 1 ? 'sample diluted 1:1 with clean water' : 'not diluted']);
   if (r.temp != null) method.push(['Water temperature', fmt(r.temp, 1) + ' °C']);
   if (r.ph != null) method.push(['pH', fmt(r.ph, 2)]);

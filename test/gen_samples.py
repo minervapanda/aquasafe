@@ -23,6 +23,11 @@ import numpy as np
 
 HERE = pathlib.Path(__file__).parent
 OUT = HERE / "samples"
+# Wipe first: fixtures are regenerated whenever the calibration changes, and a stale one
+# left behind is silently tested against the new model.
+if OUT.exists():
+    for _f in OUT.iterdir():
+        _f.unlink()
 OUT.mkdir(exist_ok=True)
 
 W, H = 400, 600
@@ -63,33 +68,51 @@ def vial(bg, fluid, noise=1.5, seed=0, vial_box=(150, 140, 250, 470)):
     return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
 
 
-def oto_rgb(conc, k, ref=223.0, leak=0.17):
-    """Inverse of the app's OTO model: pick a yellow whose BLUE channel encodes `conc`.
+def _card(cal):
+    pts = cal["calibration_card"]["transmittance_vs_zero_patch"]
+    return sorted((float(k), v) for k, v in pts.items())
 
-    Inverts the LEAK-CORRECTED form the app uses, c = k(1-L)*log10((1-L)/(T-L)), so
-    T = L + (1-L)/10**(c/(k(1-L))). Generating from the linear model instead would make
-    every fixture disagree with the app by a few percent at the top of the range and
-    stop being a round trip.
 
-    Red and green are held high and near-equal, which is what a yellow holoquinone
-    actually looks like in sRGB and what the app's yellow detector requires.
-    """
-    t = leak + (1 - leak) / (10 ** (conc / (k * (1 - leak))))
-    b = ref * t
-    # Red stays near the card, green drops slightly as the yellow deepens toward amber.
+def oto_T(conc, cal):
+    """Inverse of the card lookup: the transmittance a given mg/L sits at."""
+    P = _card(cal)
+    A = [(c, np.log10(1 / t)) for c, t in P]
+    for i in range(len(A) - 1):
+        if conc <= A[i + 1][0]:
+            f = (conc - A[i][0]) / (A[i + 1][0] - A[i][0])
+            a = A[i][1] + f * (A[i + 1][1] - A[i][1])
+            return 10 ** (-a)
+    # past the top step: extend the last segment so over-range fixtures are reachable
+    (c0, a0), (c1, a1) = A[-2], A[-1]
+    a = a1 + (conc - c1) * (a1 - a0) / (c1 - c0)
+    return 10 ** (-a)
+
+
+def oto_rgb(conc, cal, ref=223.0):
+    """A yellow whose BLUE channel puts it at the right place on the TWAD card."""
+    b = ref * oto_T(conc, cal)
     r = min(252.0, ref + 30 * (1 - b / ref))
     g = max(b + 25.0, ref - 22 * (1 - b / ref))
     return (r, g, b)
 
 
-def oto_conc(t, k, leak=0.17):
-    """Forward leak-corrected model — must match aquasafe.js concFromT exactly."""
-    return k * (1 - leak) * np.log10((1 - leak) / max(t - leak, 1e-9))
+def oto_conc(t, cal):
+    """Forward card lookup — must match aquasafe.js concFromT exactly."""
+    P = _card(cal)
+    A = [(c, np.log10(1 / tt)) for c, tt in P]
+    a = np.log10(1 / max(t, 1e-6))
+    if a <= 0:
+        return 0.0
+    for i in range(len(A) - 1):
+        if a <= A[i + 1][1]:
+            f = (a - A[i][1]) / (A[i + 1][1] - A[i][1])
+            return A[i][0] + f * (A[i + 1][0] - A[i][0])
+    return A[-1][0]
 
 
 def main():
     cal = json.loads((HERE / "oto_calibration.json").read_text())
-    k_oto = cal["k_oto_srgb"]
+    
     manifest = []
 
     for i, (conc, r, g, b) in enumerate(DPD_CARD):
@@ -110,11 +133,11 @@ def main():
     gate_b = gate_t * 223.0
     for i, conc in enumerate(cal["test_points_mg_l"]):
         name = f"oto_{str(conc).replace('.', 'p')}.png"
-        r, g, b = oto_rgb(conc, k_oto)
+        r, g, b = oto_rgb(conc, cal)
         vial(WHITE, (r, g, b), seed=100 + i).save(OUT / name)
         manifest.append({
             "file": name, "reagent": "oto", "use": "drinking",
-            "expect": "value", "expect_mg_l": round(oto_conc(b / 223.0, k_oto), 3),
+            "expect": "value", "expect_mg_l": round(oto_conc(b / 223.0, cal), 3),
             "tol": 0.08, "card_mg_l": conc,
             "why": f"OTO yellow synthesised at {conc} mg/L total chlorine from the calibrated model",
             "must_not_pass": True,
@@ -125,14 +148,14 @@ def main():
     # false-safe failure the whole gate exists to prevent, so it gets its own case.
     for conc in cal["over_range_test_points_mg_l"]:
         name = f"oto_over_{str(conc).replace('.', 'p')}.png"
-        r, g, b = oto_rgb(conc, k_oto)
+        r, g, b = oto_rgb(conc, cal)
         assert b < gate_b, f"{conc} mg/L gives B={b:.0f}, not past the gate at {gate_b:.0f}"
         vial(WHITE, (r, g, b), seed=150 + int(conc * 10)).save(OUT / name)
         manifest.append({
             "file": name, "reagent": "oto", "use": "drinking",
             "expect": "overrange",
             # the bound the app should publish: the concentration the gate corresponds to
-            "expect_bound_mg_l": round(oto_conc(gate_t, k_oto), 3), "tol": 0.08,
+            "expect_bound_mg_l": round(oto_conc(gate_t, cal), 3), "tol": 0.08,
             "card_mg_l": conc,
             "why": f"{conc} mg/L drives blue to {b:.0f} (T={b/223:.2f}), past the T={gate_t} "
                    f"saturation gate - "
@@ -147,7 +170,7 @@ def main():
     # where inventing a number would produce a false pass.
     for conc in cal["below_floor_test_points_mg_l"]:
         name = f"oto_faint_{str(conc).replace('.', 'p')}.png"
-        vial(WHITE, oto_rgb(conc, k_oto), seed=170 + int(conc * 100)).save(OUT / name)
+        vial(WHITE, oto_rgb(conc, cal), seed=170 + int(conc * 100)).save(OUT / name)
         gates.append((name, "oto", "yellow vial detected",
                       f"{conc} mg/L is below the ~{cal['range']['camera_detection_floor_mg_l']} "
                       f"mg/L camera floor - too faint to separate from white paper"))
@@ -169,11 +192,11 @@ def main():
     # 3. Auto-detection: a yellow vial is an OTO test whatever was selected before. The
     #    app reads the reagent off the colour, so this can no longer be a "wrong reagent"
     #    error - it must simply be measured as OTO.
-    r, g, b = oto_rgb(1.0, k_oto)
+    r, g, b = oto_rgb(1.0, cal)
     vial(WHITE, (r, g, b), seed=202).save(OUT / "autodetect_yellow.png")
     manifest.append({
         "file": "autodetect_yellow.png", "reagent": "oto", "use": "drinking",
-        "expect": "value", "expect_mg_l": round(oto_conc(b / 223.0, k_oto), 3), "tol": 0.08,
+        "expect": "value", "expect_mg_l": round(oto_conc(b / 223.0, cal), 3), "tol": 0.08,
         "card_mg_l": 1.0,
         "why": "A yellow vial must be recognised as OTO with no reagent selection at all",
     })

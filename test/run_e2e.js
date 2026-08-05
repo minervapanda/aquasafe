@@ -235,16 +235,21 @@ async function testCalibrationMatchesCode(browser, base) {
   const cal = JSON.parse(fs.readFileSync(path.join(__dirname, 'oto_calibration.json'), 'utf8'));
   const page = await newPage(browser, base);
   const js = await page.evaluate(() => ({
-    k: OTO_K, kLo: OTO_K_LO, kHi: OTO_K_HI, satT: OTO_SAT_T, dpdK: DPD_K,
+    card: OTO_CARD_T, satT: REAGENTS.oto.satT, fitMax: REAGENTS.oto.fitMax, dpdK: DPD_K,
   }));
-  check('k_oto matches the record', js.k === cal.k_oto_srgb, `js ${js.k} vs json ${cal.k_oto_srgb}`);
-  check('uncertainty bracket matches', js.kLo === cal.bracket[0] && js.kHi === cal.bracket[1],
-    `js [${js.kLo},${js.kHi}] vs json [${cal.bracket}]`);
-  check('transmittance gate matches', js.satT === cal.range.transmittance_gate,
-    `js ${js.satT} vs json ${cal.range.transmittance_gate}`);
+  const rec = cal.calibration_card.transmittance_vs_zero_patch;
+  const recPts = Object.keys(rec).map(x => [parseFloat(x), rec[x]]).sort((a, b) => a[0] - b[0]);
+  check('the shipped card matches the recorded card measurements',
+    JSON.stringify(js.card) === JSON.stringify(recPts), `${JSON.stringify(js.card)}`);
+  check('the gate is the transmittance of the top printed step',
+    js.satT === recPts[recPts.length - 1][1], `${js.satT}`);
+  check('the range ceiling is the top printed step',
+    js.fitMax === recPts[recPts.length - 1][0], `${js.fitMax}`);
   check('DPD constant unchanged from the shipped apps', js.dpdK === 3.778, `got ${js.dpdK}`);
-  // The bracket must actually be a bracket, or the published interval is nonsense.
-  check('bracket straddles k', js.kLo < js.k && js.k < js.kHi, `${js.kLo} < ${js.k} < ${js.kHi}`);
+  // The photo the numbers came from must stay in the repo, or the calibration becomes
+  // unreproducible.
+  check('the calibration card photo is kept',
+    fs.existsSync(path.join(__dirname, 'field', 'twad-chlorine-card.jpeg')), 'card photo missing');
   await page.close();
 }
 
@@ -580,7 +585,7 @@ async function testCaptureStrip(browser, base) {
   page = await newPage(browser, base);
   await page.evaluate(() => setReagent('oto'));
   input = await page.$('#photoInput');
-  await input.uploadFile(path.join(SAMPLES, 'oto_over_3p0.png'));
+  await input.uploadFile(path.join(SAMPLES, 'oto_over_4p0.png'));
   await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
   st = await read(page);
   check('over range: distinct state, shown as a bound', /\bover\b/.test(st.cls) && st.val.startsWith('>'),
@@ -665,6 +670,7 @@ async function testFieldCaptures(browser, base) {
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
 
   for (const m of manifest) {
+    if (m.expect === 'skip') continue;   // calibration source, not a fixture
     const page = await newPage(browser, base);
     // No reagent selection — a real operator no longer makes one.
     await page.evaluate(u => setUse(u), m.use);
@@ -727,9 +733,9 @@ async function testLeakModel(browser, base) {
   // Absolute, not relative: the constant is anchored at low concentration, so what
   // matters is that the correction does not move those readings by an amount anyone
   // could act on. 0.02 mg/L is a tenth of the tightest decision threshold in the app.
-  const worst = Math.max(...r.drift.map(d => Math.abs(d.leak - d.linear)));
-  check('low range moves by under 0.02 mg/L vs the anchored linear model', worst < 0.02,
-    r.drift.map(d => `T=${d.T.toFixed(2)} ${(d.leak - d.linear).toFixed(3)}`).join(', '));
+  // The card lookup replaced the modelled constant, so comparing it to Beer's law is no
+  // longer the right check — reproducing the printed steps is, and that is asserted in the
+  // card-conformance test. What must still hold here is monotonicity.
   const monotonic = r.curve.every((v, i) => i === 0 || v > r.curve[i - 1]);
   check('concentration rises monotonically as transmittance falls', monotonic, 'curve is not monotonic');
 
@@ -772,15 +778,21 @@ async function testPhedProtocol(browser, base) {
     `timer=${forced.timer} waitWording=${forced.wait}`);
 
   // The card's own bands, so the app and the card in the operator's hand agree.
+  // The team's own card: TWAD Board, steps 0.0 / 0.2 / 0.5 / 1.0 / 2.0 / 3.0.
   const bands = await page.evaluate(() => ({
-    faint: otoCardBand(0.3), light: otoCardBand(1.2), bright: otoCardBand(2.5),
-    dark: otoCardBand(4.5), high: otoCardBand(12), gap: otoCardBand(3.5),
+    steps: OTO_CARD_T.map(x => x[0]),
+    onStep: otoCardBand(1.0), between: otoCardBand(1.4), past: otoCardBand(5),
+    exact: [0.2, 0.5, 1.0, 2.0, 3.0].map(c => concFromT(
+      OTO_CARD_T[OTO_CARD_T.findIndex(x => x[0] === c)][1], REAGENTS.oto)),
   }));
-  check('0.3 mg/L maps to the clear/faint patch', /clear \/ faint/i.test(bands.faint), bands.faint);
-  check('2.5 mg/L maps to the bright yellow patch', /bright yellow/i.test(bands.bright), bands.bright);
-  check('12 mg/L maps to the orange/brown patch', /orange \/ brown/i.test(bands.high), bands.high);
-  // The printed card has gaps between patches; claiming a patch there would be false.
-  check('a value between printed patches says so', /between/i.test(bands.gap), bands.gap);
+  check('the card is the TWAD scale 0/0.2/0.5/1/2/3',
+    JSON.stringify(bands.steps) === JSON.stringify([0, 0.2, 0.5, 1, 2, 3]), `${bands.steps}`);
+  check('a reading on a printed step names that step', /the 1\.0 patch/.test(bands.onStep), bands.onStep);
+  check('a reading between steps says so', /between the 1\.0 and 2\.0/.test(bands.between), bands.between);
+  check('past the top step says so', /past the 3\.0/.test(bands.past), bands.past);
+  const err = bands.exact.map((v, i2) => Math.abs(v - [0.2, 0.5, 1.0, 2.0, 3.0][i2]));
+  check('the lookup reproduces every printed step', Math.max(...err) < 1e-9,
+    `errors ${err.map(e => e.toExponential(1))}`);
 
   // Orange/brown means 10+ mg/L on the card, not a reagent fault.
   const off = await page.evaluate(() => {
@@ -872,6 +884,25 @@ async function testWarmCastVote(browser, base) {
   check('pink vial on neutral paper votes DPD', r.neutral === 'dpd', `got ${r.neutral}`);
   check('pink vial on warm paper still votes DPD', r.warm === 'dpd', `got ${r.warm}`);
   check('pink vial on very warm paper still votes DPD', r['very warm'] === 'dpd', `got ${r['very warm']}`);
+
+  // And when it genuinely cannot tell, it must say so rather than pick one. Half pink,
+  // half yellow in the outline is the ambiguous case by construction.
+  const tie = await page.evaluate(() => {
+    const W = 200, H = 300, d = new Uint8ClampedArray(4 * W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const o = (y * W + x) * 4;
+      const inVial = x > W * 0.30 && x < W * 0.70 && y > H * 0.30 && y < H * 0.60;
+      const c = !inVial ? [240, 240, 240] : (x < W * 0.5 ? [231, 171, 208] : [238, 221, 112]);
+      d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 255;
+    }
+    const s = analyzeAuto(d, W, H, false);
+    return { pick: pickReagent(d, W, H), gate: gateReasons(s) };
+  });
+  check('an ambiguous vial is refused, not guessed', tie.pick === 'tie' && tie.gate.ok === false,
+    `pick=${tie.pick} ok=${tie.gate && tie.gate.ok}`);
+  check('the refusal explains pink vs yellow',
+    /pink/i.test(tie.gate.longMsg) && /yellow/i.test(tie.gate.longMsg) && /cannot tell/i.test(tie.gate.longMsg),
+    tie.gate.longMsg.slice(0, 120));
   await page.close();
 }
 

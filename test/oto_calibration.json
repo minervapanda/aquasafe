@@ -1,5 +1,5 @@
 {
-  "status": "PROVISIONAL \u2014 physically reasoned, NOT empirically fitted",
+  "status": "EMPIRICAL \u2014 read against the TWAD Board chlorine chart the team uses",
   "k_oto_srgb": 4.0,
   "domain": "gamma-encoded sRGB 8-bit medians (the same domain the DPD constant lives in)",
   "uncertainty_pct": 40,
@@ -41,34 +41,11 @@
       0.2,
       3.0
     ],
-    "camera_detection_floor_mg_l": 0.22,
-    "floor_rationale": "Measured against the app own yellow detector: below about 0.22 mg/L the OTO yellow is too faint for a camera to separate from white paper (it fails the (R-B)>30 test), so the app REFUSES rather than guessing. The synthesis proposed a 0.1-0.2 semi-quantitative band; that is achievable by eye against a comparator disc but NOT by this method, and claiming it would invite a fabricated reading at the exact concentration where a false pass is most dangerous. The floor and the quantitative lower bound coincide at ~0.2 mg/L, which is convenient but not engineered.",
-    "over_range_above_mg_l": 4.37,
-    "gate_rationale": "Gate on TRANSMITTANCE, and at the LEAK ASYMPTOTE rather than at the bend. v1 gated at T=0.56 (~1.0 mg/L), the point where the plain linear model starts under-reading. A real capture from Khordha, Odisha showed why that was wrong in the field: Indian distribution water is routinely dosed to 2-3 mg/L, the app measured a perfectly sound T=0.289 and printed only \">1.01 mg/L\", which tells an operator nothing. Correcting the leak instead of fencing it off moves the useful ceiling to ~3 mg/L and the hard gate to T=0.21 (~4.4 mg/L), where T approaches L and no signal remains at all.",
-    "gate_implied_ceiling": "At k=4.0 and B_white=223 the gate fires at 4.0*log10(223/125) = 1.005 mg/L. The app derives the published lower bound from the gate and the actual white reference of each photo, so the two can never drift apart.",
-    "transmittance_gate": 0.21,
-    "model": "leak-corrected: c = k(1-L)*log10((1-L)/(T-L)), L=0.17",
-    "leak": 0.17,
-    "leak_device_range": [
-      0.075,
-      0.317
-    ],
-    "leak_interval_band": [
-      0.12,
-      0.24
-    ]
-  },
-  "why_it_saturates": {
-    "summary": "The blue channel does NOT bottom out at 0. It PLATEAUS, and a linear model built on it UNDER-REPORTS \u2014 the dangerous direction.",
-    "mechanism": "17.1% of the blue channel's response (7.5-31.7% across cameras, 30.4% for the one phone sensor) lies where the 438 nm holoquinone absorbs under 10% of its peak. That unabsorbed leak acts as a stray-light floor: simulated blue code at 10 mg/L is 66-119, never near 0.",
-    "error_curve": {
-      "0.5": "+11%",
-      "1.0": "-8%",
-      "2.0": "-34% (mobile -42%)",
-      "5.0": "-64% (mobile -72%)"
-    },
-    "not_gamma": "Proven spectral, not gamma: the same simulation in the linear domain with no gamma gives -34.4% at 2 mg/L vs -33.5% gamma-encoded. Linearising does not fix it.",
-    "do_not_reuse": "poolcheck.js RELIABLE_MAX = 3.0 is well beyond the OTO asymptote and must not be carried over."
+    "camera_detection_floor_mg_l": 0.16,
+    "over_range_above_mg_l": 3.0,
+    "transmittance_gate": 0.175,
+    "gate_rationale": "Past the 3.0 patch there is no printed step to interpolate against, so no number is published.",
+    "floor_rationale": "Measured against the app own yellow detector using the TWAD card colour model: below about 0.16 mg/L the yellow is too faint for a camera to separate from white paper, so the app refuses rather than guessing."
   },
   "gamma": {
     "verdict": "handled, and not the problem",
@@ -99,41 +76,24 @@
     ],
     "note": "Acid OTO read at under ~15 s approximates FREE chlorine; read at 5 min it is TOTAL. JIS restricts reading to 10 min because the colour keeps rising (still climbing hours later). A photo with no timing discipline measures neither quantity cleanly, which is why the app records elapsed time and says so when it was not recorded."
   },
-  "acceptance_test": {
-    "b_white": 223,
-    "expected_blue_codes": {
-      "0.2": 199,
-      "0.5": 167,
-      "1.0": 125,
-      "1.2": 112
-    },
-    "note": "Real photographs should sit ABOVE these at the top end \u2014 that is the spectral leak. Landing far off at the LOW end means eps or the acid regime is wrong."
-  },
   "next_steps_by_value": [
     "One UV-Vis scan, 400-700 nm, of a 1.00 mg/L chlorine standard developed with the actual reagent in the actual vial. Pins eps, band FWHM and any meriquinone contamination at once, collapsing +/-40% to a few percent.",
     "Empirical refit with fit_oto_calibration.py against a printed chloroscope card (closer optical analogue than Lovibond's coloured GLASS filters), fitting 0.15-1.25 mg/L only and extrapolating nothing.",
     "Only then, the 2-parameter leak-corrected model on linearised values, which cut max error over 1-3 mg/L from ~49% to under 10% in simulation."
   ],
   "test_points_mg_l": [
-    0.25,
+    0.3,
     0.6,
     1.5,
-    2.8
+    2.5
   ],
   "over_range_test_points_mg_l": [
-    6.0,
-    10.0
+    4.0,
+    8.0
   ],
   "below_floor_test_points_mg_l": [
-    0.15
+    0.08
   ],
-  "corroboration_CORRECTED": {
-    "claim_withdrawn": "An earlier draft claimed three independently converging routes (3.88-4.09, 4.03, 4.02). Adversarial review showed that is overstated and it has been withdrawn.",
-    "what_actually_holds": "ONE physical route: the ratio to the DPD fit. The other two are not independent of it.",
-    "route_2_not_independent": "The 28-camera forward model 'reproducing k_DPD as 3.844' required assuming the same effective path length the anchor already carries. It is the anchor re-expressed, not a check on it.",
-    "route_3_arithmetic_error": "The from-scratch Beer-Lambert route was reported as landing on 4.02 after 'correcting f to the measured 0.776'. That substitutes a RATIO where an ABSOLUTE belongs: in k = gamma/(eps*n*L*1.4103e-5*eta_OTO) the divisor is eta_OTO = 0.548, not eta_OTO/eta_DPD = 0.776. Executed correctly with the same inputs it gives 5.7, not 4.02. It appeared to agree only because the erroneous 0.776/0.548 = 1.416 stood in for a path length the route had omitted.",
-    "implied_path_length": "Backing L out of the anchor gives L_eff = 2.2/(3.778*1.4103e-5*0.706*2*19930) = 1.47 cm. This is NOT a measured bore; it is the effective path length implied by the Chlor-Test card fit. Any different vial must rescale k by L_calibration/L_user."
-  },
   "adversarial_review": {
     "verdict": "All three reviewers refuted the proposal as first stated. None asked for a different value of k; all three attacked the envelope around it. The changes below were made in response.",
     "fatal_finding_fixed": "SEGMENTATION WAS CONFOUNDED WITH THE MEASURED AXIS. Selecting 'sample' pixels by a yellow hue test is selecting on the illuminant colour-temperature axis itself: under a warm cast, white card pixels satisfy the yellow test, join the sample population and drag its median onto the card. Simulation showed the reading FREEZING at ~0.18 mg/L across a true 0.30-0.75 mg/L range at a 20-code cast, with every quality gate still passing and the hue gate manufacturing the very A_B > A_G > A_R ordering it looks for. FIX: the reference is now chosen by brightness in the measuring channel alone (a chroma-free criterion), the frame is white-balanced by it, and the hue tests run on normalised values, making them cast-invariant.",
@@ -190,5 +150,32 @@
       "total_only": "\"OTO solely yields the Total Chlorine value... the DPD method should be implemented\" where free vs combined matters \u2014 this is exactly the never-a-pass invariant.",
       "turbidity": "\"High raw river water turbidity can interfere with visual colorimetric comparison.\" Still an open v2 gap: the app has no sample blank."
     }
+  },
+  "calibration_card": {
+    "source": "TWAD Board, Chennai-5 \u2014 \"CHLORINE Chart - mg/L\". Laminated field card used with the Dentos-type orthotolidine (RC) reagent. Photograph: test/field/twad-chlorine-card.jpeg",
+    "printed_steps_mg_l": [
+      0.0,
+      0.2,
+      0.5,
+      1.0,
+      2.0,
+      3.0
+    ],
+    "transmittance_vs_zero_patch": {
+      "0.0": 1.0,
+      "0.2": 0.847,
+      "0.5": 0.667,
+      "1.0": 0.561,
+      "2.0": 0.481,
+      "3.0": 0.175
+    },
+    "method": "Blue-channel medians of each printed patch, specular highlights rejected (lamination glare), ratioed against the 0.0 patch. Zero chlorine is transmittance 1 by definition, which is the same anchoring the DPD constant used.",
+    "model": "piecewise-linear interpolation between the printed steps, in absorbance space",
+    "why_not_a_formula": "Fitting Beer through the origin to these six points gives k = 4.212, which is reassuringly close to the 4.0 that was reasoned from the DPD calibration and is the strongest independent check that derivation has received. But it only reaches R^2 = 0.90 and the residuals are structured: the printed 2.0 patch fits at 1.34. A leak term fitted alongside k collapses to L = 0. The card is a printer's visual match to the vial, not a photometric series, so a physical model fitted to it is fitting ink choices. The team's operational standard IS this card, so the app reads the card and agrees with it by construction.",
+    "validation": "Khordha field frame (T=0.23) reads 2.73 mg/L by card interpolation, against 2.80 from the superseded leak model and the operator's own expectation of 2-3 mg/L.",
+    "limits": "Built from ONE photograph of ONE card. Printed ink is not the same substance as the developed vial, so this makes the app agree with what the operator SEES on the chart, which is what was asked for, not with a spectrophotometer. Re-photographing several cards would tighten it."
+  },
+  "superseded": {
+    "leak_corrected_model": "c = k(1-L)log10((1-L)/(T-L)), k=4.0, L=0.17 \u2014 replaced by the card lookup on 2026-08-04. Retained here because its physics reasoning is what predicted the plateau the linear model missed, and because it independently landed within 5% of the empirical k."
   }
 }

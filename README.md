@@ -15,7 +15,7 @@ own site, with two additions: **OTO reagent support** and **PDF report download*
 | Colour | pink | yellow |
 | Channel read | green | blue |
 | Measures | **free** chlorine | **total** chlorine (free + combined) |
-| Calibrated range | 0.1 – 1.0 mg/L, fitted | 0.2 – 3 mg/L, **provisional ±40 %** |
+| Calibrated range | 0.1 – 1.0 mg/L, fitted | 0.2 – 3.0 mg/L, read off the TWAD chart |
 | Can demonstrate compliance? | **no** — screening only | **no** — see below |
 
 ## The one thing to understand before using OTO
@@ -57,8 +57,8 @@ through the origin on six photographed Chlor-Test comparator patches spanning 0.
 (R² = 0.995). That path is numerically identical to the shipped PoolCheck and AquaTreat
 apps, so results stay comparable across the family.
 
-OTO-yellow absorbs around 438 nm, so the **blue** channel is read, with a **provisional**
-k = 4.0. See [Calibration](#calibration) for where that number comes from and how far it
+OTO-yellow absorbs around 438 nm, so the **blue** channel is read, and the reading is
+interpolated between the printed steps of the **TWAD Board chlorine chart** the team uses. See [Calibration](#calibration) for where that number comes from and how far it
 can be trusted — the short version is ±40 %, which is why OTO readings are shown as an
 interval (`0.61 mg/L, provisional range 0.44–0.86`) rather than a bare figure.
 
