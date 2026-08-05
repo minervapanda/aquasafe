@@ -408,16 +408,10 @@ function offChannelCheck(rg, sV, wV) {
     var s = Math.max(_median(sV[c]), 1), w = _median(wV[c]);
     return w > 0 ? Math.log10(w / s) : 0;
   }
-  if (rg.species !== 'total') {
-    // DPD. Turbidity, iron and humic colour attenuate green indistinguishably from the
-    // Wurster dye, and this is the ONLY path that can issue a pass: A=0.05 of pure scatter
-    // reads as 0.19 mg/L, which clears the 0.2 mg/L consumer-end figure on water with no
-    // chlorine in it at all. A clean pink vial has A_red/A_green around 0.11, so there is
-    // ample headroom before the guard bites.
-    var aG = A(1), aR0 = A(0);
-    return { aRed: aR0, aBlue: aG,
-             suspect: aG > 0.02 && aR0 > 0.25 * aG && aR0 > 0.04 };
-  }
+  // DPD is deliberately NOT gated here: it is unchanged from the shipped apps by
+  // instruction. The trade-off is stated in the SOP instead — muddy or iron-bearing water
+  // must be settled or filtered before testing, because it darkens green like the dye does.
+  if (rg.species !== 'total') return null;
   var aBlue = A(2), aRed = A(0);
   return { aRed: aRed, aBlue: aBlue,
            suspect: aBlue > 0.02 && aRed > 0.20 * aBlue && aRed > 0.04 };
@@ -663,9 +657,6 @@ function gateReasons(s) {
     return { ok: false, shortMsg: 'Move the vial inside the outline',
       longMsg: '<b>No test vial found.</b> Hold the vial inside the outline with plain white paper behind it, and take the photo again. If the water has no colour at all, read your colour card instead — this app will not report a zero it cannot see.' };
   }
-  if (s.offChannel && s.offChannel.suspect && rg.species !== 'total') return { ok: false,
-    shortMsg: 'Not a clean pink — water may be muddy',
-    longMsg: '<b>This colour is not a clean pink.</b> The water may be muddy, or it may have iron in it. Both make the reading too high. Let the sample stand until it clears, or filter it, then do the test again.' };
   if (s.offChannel && s.offChannel.suspect) return { ok: false,
     shortMsg: 'Colour is not a clean yellow — check the reagent',
     longMsg: '<b>Off the yellow scale.</b> The vial is absorbing red light as well as blue, so it is not the clean yellow this calibration covers. If it looks <b>orange or brown</b> that is the top of the PHED card — <b>10 mg/L or more</b> of chlorine, far above what a photo can resolve: dilute 1:1 with chlorine-free water, set the dilution below, and photograph again. If it looks <b>blue-green</b> instead, the reagent is under-acidified or stale, or it is the neutral (IS 3025 Part 26) variant this app cannot read — make a fresh test with acid OTO.' };
@@ -989,6 +980,7 @@ function renderResult(r, px) {
     activeCl: (activeCl !== null ? parseFloat(activeCl.toFixed(2)) : null),
     cardBand: rg.species === 'total' ? otoCardBand(r.conc) : null,
     site: (val('siteName') || '').trim(),
+    operator: (val('operator') || '').trim(),
     lat: lastGeo ? lastGeo.lat : null, lon: lastGeo ? lastGeo.lon : null,
     acc: lastGeo ? lastGeo.acc : null,
     geoAgeS: (lastGeo && lastGeo.at) ? Math.round((Date.now() - lastGeo.at) / 1000) : null,
@@ -1022,7 +1014,17 @@ function checkPH() {
 }
 
 // ---- day-wise on-device test log ----
-var LOGKEY = 'aquasafe_log_v1';
+var LOGKEY = 'aquasafe_log_v1', OPKEY = 'aquasafe_operator';
+// Remembered across sessions: the operator types their name once, not once per sample.
+function saveOperator() {
+  try { localStorage.setItem(OPKEY, (val('operator') || '').trim()); } catch (e) { }
+}
+function loadOperator() {
+  try {
+    var v = localStorage.getItem(OPKEY) || '';
+    var e = $('operator'); if (e && v) e.value = v;
+  } catch (e) { }
+}
 function loadLog() { try { return JSON.parse(localStorage.getItem(LOGKEY) || '[]'); } catch (e) { return []; } }
 var _capWarned = false;
 function saveLog(a) {
@@ -1086,14 +1088,14 @@ function csvCell(v) {
 }
 function exportHistory() {
   var log = loadLog(); if (!log.length) return;
-  var head = ['timestamp', 'date', 'time', 'sample_point', 'reagent', 'species', 'chlorine_mg_L',
+  var head = ['timestamp', 'date', 'time', 'operator', 'sample_point', 'reagent', 'species', 'chlorine_mg_L',
     'over_range', 'range_lo_mg_L', 'range_hi_mg_L', 'phed_card_band', 'verdict', 'use', 'dilution', 'absorbance', 'channel_sample', 'channel_white',
     'temperature_C', 'pH', 'cyanuric_acid_mg_L', 'hocl_fraction', 'active_chlorine_mg_L',
     'latitude', 'longitude', 'source'];
   var lines = [head.map(csvCell).join(',')];
   log.forEach(function (r) {
     var d = new Date(r.ts);
-    lines.push([r.ts, d.toLocaleDateString(APP_LOCALE), d.toLocaleTimeString(APP_LOCALE), r.site || '',
+    lines.push([r.ts, d.toLocaleDateString(APP_LOCALE), d.toLocaleTimeString(APP_LOCALE), r.operator || '', r.site || '',
       r.reagent || 'DPD', r.speciesLabel || 'Free chlorine', fmt(r.conc, 2), r.overRange ? 'yes' : 'no',
       r.concLo != null ? r.concLo : '', r.concHi != null ? r.concHi : '', r.cardBand || '',
       r.bandLabel || '', r.use || '', r.dilution != null ? r.dilution : '',
@@ -1155,6 +1157,8 @@ function stampImage(srcEl, w, h, r) {
     pad, y, cw - 2 * pad, Math.round(band * 0.075), true); y += lh;
   cx.fillStyle = '#fff'; cx.font = Math.round(band * 0.075) + 'px sans-serif';
   if (site) { fitText(cx, 'Site: ' + site.substring(0, 46), pad, y, cw - 2 * pad, Math.round(band * 0.085), true); y += lh; cx.font = Math.round(band * 0.075) + 'px sans-serif'; }
+  var op = (val('operator') || '').trim();
+  if (op) { fitText(cx, 'Tested by: ' + op.substring(0, 42), pad, y, cw - 2 * pad, Math.round(band * 0.075)); y += lh; }
   if (hasTP) { cx.fillText('Temp ' + (tv !== '' ? parseFloat(tv).toFixed(1) + ' °C' : '—') + '    pH ' + (pv !== '' ? parseFloat(pv).toFixed(2) : '—'), pad, y); y += lh; }
   var prec = (lastGeo && lastGeo.acc != null && lastGeo.acc > 100) ? 3 : 5;
   var lat = lastGeo ? lastGeo.lat.toFixed(prec) : '—', lon = lastGeo ? lastGeo.lon.toFixed(prec) : '—';
@@ -1222,6 +1226,7 @@ function buildReportDoc() {
   }[r.band] || [[0.9, 0.9, 0.9], [0.2, 0.2, 0.2]];
 
   var rows = [
+    ['Tested by', r.operator || 'NOT RECORDED'],
     ['Sample point', r.site || 'not recorded'],
     ['Application', r.use],
     ['Reagent', rg.name + ' — measures ' + rg.speciesLabel.toLowerCase()],
@@ -1366,7 +1371,7 @@ function ackCritical() {
 function init() {
   setReagent('dpd'); setUse('drinking');
   clearResult('Capture a test to see the result.');
-  requestGeo(); startCam(); renderHistory();
+  loadOperator(); requestGeo(); startCam(); renderHistory();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () { });
 }
 if (typeof document !== 'undefined' && document.getElementById('camWrap')) init();

@@ -221,6 +221,12 @@
        calculation AND re-stamps the photo, so the record cannot disagree with itself. -->
   <div class="card">
     <h2>2 · Save the record</h2>
+    <!-- Entered once and remembered on the device, so it costs no typing per sample. A
+         supervisor cannot accept a reading from a junior operator on a record that does
+         not say who took it. -->
+    <label for="operator">Who is testing?</label>
+    <input id="operator" type="text" placeholder="e.g. R. Kumar — Ward 7 field team"
+           autocomplete="name" oninput="saveOperator()">
     <label for="siteName">Where was this sample taken?</label>
     <input id="siteName" type="text" placeholder="e.g. Ward 7 standpost — consumer tap"
            autocomplete="off" oninput="rerender()">

@@ -210,6 +210,13 @@ async function testCSVandLog(browser, base) {
   await page.evaluate(() => saveReading());
 
   const hist = await page.evaluate(() => document.getElementById('histBody').innerText);
+  // The name must persist so it is not retyped every sample.
+  const persisted = await page.evaluate(async () => {
+    document.getElementById('operator').value = 'R. Kumar'; saveOperator();
+    const again = await fetch(location.href).then(() => localStorage.getItem('aquasafe_operator'));
+    return again;
+  });
+  check('operator name is remembered on the device', persisted === 'R. Kumar', `got ${persisted}`);
   check('log: both reagents listed', /DPD/.test(hist) && /OTO/.test(hist), hist.slice(0, 200));
   check('log: free and total summarised separately',
     /free/i.test(hist) && /total/i.test(hist), hist.split('\n')[0]);
@@ -503,8 +510,10 @@ async function testLayout(browser, base) {
   check('all step chips render identically', st.styles.length === 1, `distinct styles: ${st.styles}`);
   // The product constraint: location is the only thing an operator types. manualCl is the
   // no-camera fallback, which is a reading not a setting.
-  check('location is the only field the operator fills in',
-    st.inputs.filter(i => i !== 'manualCl').length === 1 && st.inputs.includes('siteName'),
+  // Location plus the operator's name, which is entered once and remembered rather than
+  // typed per sample. manualCl is the no-camera fallback, a reading not a setting.
+  check('only location and the remembered operator name are typed',
+    st.inputs.filter(i => i !== 'manualCl').sort().join(',') === 'operator,siteName',
     `visible inputs: ${st.inputs}`);
   check('location sits with Save', st.locationWithSave, 'siteName is not in the Save card');
   check('no technical exposition on screen', !st.technical, 'found absorbance/channel/calibration wording');
