@@ -63,18 +63,28 @@ def vial(bg, fluid, noise=1.5, seed=0, vial_box=(150, 140, 250, 470)):
     return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8))
 
 
-def oto_rgb(conc, k, ref=223.0):
+def oto_rgb(conc, k, ref=223.0, leak=0.17):
     """Inverse of the app's OTO model: pick a yellow whose BLUE channel encodes `conc`.
 
-    B = ref / 10**(conc/k). Red and green are held high and near-equal, which is what
-    a yellow holoquinone actually looks like in sRGB and what the app's yellow
-    detector requires ((R-B)>30, (G-B)>20).
+    Inverts the LEAK-CORRECTED form the app uses, c = k(1-L)*log10((1-L)/(T-L)), so
+    T = L + (1-L)/10**(c/(k(1-L))). Generating from the linear model instead would make
+    every fixture disagree with the app by a few percent at the top of the range and
+    stop being a round trip.
+
+    Red and green are held high and near-equal, which is what a yellow holoquinone
+    actually looks like in sRGB and what the app's yellow detector requires.
     """
-    b = ref / (10 ** (conc / k))
+    t = leak + (1 - leak) / (10 ** (conc / (k * (1 - leak))))
+    b = ref * t
     # Red stays near the card, green drops slightly as the yellow deepens toward amber.
     r = min(252.0, ref + 30 * (1 - b / ref))
     g = max(b + 25.0, ref - 22 * (1 - b / ref))
     return (r, g, b)
+
+
+def oto_conc(t, k, leak=0.17):
+    """Forward leak-corrected model — must match aquasafe.js concFromT exactly."""
+    return k * (1 - leak) * np.log10((1 - leak) / max(t - leak, 1e-9))
 
 
 def main():
@@ -104,7 +114,7 @@ def main():
         vial(WHITE, (r, g, b), seed=100 + i).save(OUT / name)
         manifest.append({
             "file": name, "reagent": "oto", "use": "drinking",
-            "expect": "value", "expect_mg_l": round(k_oto * np.log10(223.0 / b), 3),
+            "expect": "value", "expect_mg_l": round(oto_conc(b / 223.0, k_oto), 3),
             "tol": 0.08, "card_mg_l": conc,
             "why": f"OTO yellow synthesised at {conc} mg/L total chlorine from the calibrated model",
             "must_not_pass": True,
@@ -122,7 +132,7 @@ def main():
             "file": name, "reagent": "oto", "use": "drinking",
             "expect": "overrange",
             # the bound the app should publish: the concentration the gate corresponds to
-            "expect_bound_mg_l": round(k_oto * np.log10(1.0 / gate_t), 3), "tol": 0.08,
+            "expect_bound_mg_l": round(oto_conc(gate_t, k_oto), 3), "tol": 0.08,
             "card_mg_l": conc,
             "why": f"{conc} mg/L drives blue to {b:.0f} (T={b/223:.2f}), past the T={gate_t} "
                    f"saturation gate - "

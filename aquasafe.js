@@ -40,7 +40,7 @@ var DPD_SAT_T = 0.09;
 // absorptivity is almost exactly cancelled by its 1:1 (rather than 2:1) stoichiometry and
 // its worse blue-channel overlap. Do not "fix" it.
 var OTO_K = 4.0;
-var OTO_FIT_MAX = 1.2;
+var OTO_FIT_MAX = 3.0;
 // Gate on the CHANNEL CODE, not on computed mg/L: across a wide sweep of absorptivity and
 // path length the +/-15% accuracy ceiling always lands at blue code 120-135, so the code
 // gate is camera-robust in a way a concentration threshold is not. Below it the blue
@@ -50,13 +50,33 @@ var OTO_FIT_MAX = 1.2;
 // Transmittance floor. B/B_white = 0.56 is where the +/-15% accuracy ceiling lands
 // across a wide sweep of absorptivity and path length, so it is the camera-robust form
 // of the same threshold. At k=4.0 it corresponds to 4.0*log10(1/0.56) = 1.01 mg/L.
-var OTO_SAT_T = 0.56;
+// The blue channel does NOT fall to zero on a strong yellow — it PLATEAUS, because
+// ~17% of the channel's response sits where the 438 nm holoquinone barely absorbs. That
+// unabsorbed leak acts as a stray-light floor, so a plain Beer model bends over and
+// under-reads badly above ~1 mg/L.
+//
+// v1 handled that by refusing to print a number past the bend. A real capture from
+// Khordha, Odisha showed why that is not good enough: Indian distribution water is
+// routinely dosed to 2-3 mg/L, the app measured T=0.289 (a perfectly sound reading),
+// and reported only ">1.01" — useless to the operator.
+//
+// So the leak is now CORRECTED rather than fenced off:
+//     c = k(1-L) * log10((1-L)/(T-L))
+// The (1-L) on k re-normalises so the low range is unchanged (within 2% of the linear
+// model out to ~0.3 mg/L, where the constant was anchored) while the high range bends
+// back up. T -> L is the true asymptote: there the dye has absorbed everything it can
+// reach and no signal remains, which is where the gate now sits.
+var OTO_LEAK = 0.17;
+var OTO_SAT_T = 0.21;
+// Device spread on the leak, used for the published interval. The full 28-camera range
+// was 0.075-0.317; this is the central band. The extremes live in the calibration record.
+var OTO_LEAK_LO = 0.12, OTO_LEAK_HI = 0.24;
 // Both ends of the +/-40% bracket on k. The uncertainty straddles the 0.2 mg/L
 // adequacy threshold, so every OTO number is published as an interval rather than a
 // point: at the low end of the bracket a true 0.15 mg/L would display as 0.21 and
 // appear to clear a line it does not clear.
 var OTO_K_LO = 2.9, OTO_K_HI = 5.7;
-var OTO_CAL_NOTE = 'Provisional constant (±40%), reasoned from the DPD calibration rather than fitted — reliable only over 0.2–1.2 mg/L.';
+var OTO_CAL_NOTE = 'Provisional constant (±40%), reasoned from the DPD calibration rather than fitted, with a leak correction above ~1 mg/L — usable 0.2–3 mg/L, refused past ~4.4.';
 
 var reagentId = 'dpd', useId = 'drinking';
 var camStream = null, roiTimer = null, lastGeo = null, lastReading = null, lastResult = null;
@@ -101,6 +121,8 @@ var REAGENTS = {
     get k() { return DPD_K; },
     get fitMax() { return DPD_FIT_MAX; },
     get satT() { return DPD_SAT_T; },
+    leak: 0,   // DPD's green-channel leak is ~5% and its constant was fitted empirically
+    leakLo: 0, leakHi: 0,
     segClass: 'pinkish',
     // pink: red-dominant with blue also above green (magenta-ward), never neutral grey
     isAnalyte: function (R, G, B) { return R > G + 8 && B > G + 2 && (R - G) > 10; },
@@ -116,6 +138,9 @@ var REAGENTS = {
     get k() { return OTO_K; },
     get fitMax() { return OTO_FIT_MAX; },
     get satT() { return OTO_SAT_T; },
+    get leak() { return OTO_LEAK; },
+    get leakLo() { return OTO_LEAK_LO; },
+    get leakHi() { return OTO_LEAK_HI; },
     segClass: 'yellowish',
     // yellow/amber: red and green both well above blue. Deep over-range samples run
     // orange to brown and still satisfy this — they are caught by the floor, not here.
@@ -303,28 +328,48 @@ function dilutionFactor() { return parseFloat($('dilution').value) || 1; }
 // of 125 fires at 0.32 mg/L against a dim reference and 1.24 mg/L against a bright one,
 // a 4x swing driven purely by exposure. Saturation is a ratio phenomenon, so the gate
 // has to be a ratio to be exposure-independent.
+function concFromT(T, rg, k, L) {
+  k = (k == null) ? rg.k : k;
+  L = (L == null) ? (rg.leak || 0) : L;
+  if (!L) return Math.max(0, k * Math.log10(1 / Math.max(T, 1e-6)));
+  return Math.max(0, k * (1 - L) * Math.log10((1 - L) / Math.max(T - L, 1e-6)));
+}
 function concFromChannel(sample, ref, dil, rg) {
   rg = rg || R();
-  var overRange = ref > 0 && (sample / ref) <= rg.satT;
-  // Clamping sample to ref keeps A >= 0 (a vial brighter than the card is noise, not
-  // negative chlorine) — but record it, because silently clamping is how a saturated
-  // reading gets laundered into a confident one.
+  var T = ref > 0 ? Math.min(sample / ref, 1) : 1;
+  var overRange = T <= rg.satT;
+  // Clamping sample to ref keeps the reading non-negative (a vial brighter than the card
+  // is noise, not negative chlorine) — but record it, because silently clamping is how a
+  // saturated reading gets laundered into a confident one.
   var clamped = sample > ref;
-  var s = Math.max(Math.min(sample, ref), 1);
-  var A = Math.log10(ref / s);
-  var conc = Math.max(0, rg.k * A) * (dil || 1);
-  // Past the gate the model has flattened, so the computed figure is not a conservative
-  // estimate — it is a number biased LOW by up to 60%. Report the concentration the GATE
-  // itself corresponds to, at this photograph's actual white reference, as a lower bound.
-  // Deriving the bound from the same threshold that triggered it keeps the two from
-  // drifting apart (a fixed ">1.2" beside a gate that fires at 1.0 is incoherent), and
-  // ">1.01 mg/L" is true where "1.34 mg/L" is not.
-  if (overRange) conc = rg.k * Math.log10(1 / rg.satT) * (dil || 1);
+  // Past the gate the dye has absorbed everything the channel can see, so the value at
+  // the gate is published as a lower bound rather than a spuriously precise number.
+  var conc = concFromT(Math.max(T, rg.satT), rg) * (dil || 1);
   return {
-    A: A, conc: conc, overRange: overRange, clamped: clamped,
+    A: Math.log10(1 / Math.max(T, 1e-6)), T: T, conc: conc,
+    overRange: overRange, clamped: clamped,
     extrapolated: !overRange && conc / (dil || 1) > rg.fitMax,
     adviseDil: overRange || conc / (dil || 1) > rg.fitMax
   };
+}
+// Honest interval, swept over both uncertain parameters: the constant (+/-40%, because
+// no molar absorptivity for the o-tolidine product is published anywhere) and the
+// device-dependent leak. Both widen sharply near the asymptote, which is the point —
+// a number quoted to two decimals at 3 mg/L would be false precision.
+function concInterval(T, rg, dil) {
+  if (!rg.leak) return null;                       // DPD is empirically fitted
+  var ks = [OTO_K_LO, rg.k, OTO_K_HI], Ls = [rg.leakLo, rg.leak, rg.leakHi];
+  var lo = Infinity, hi = 0, open = false;
+  for (var i = 0; i < ks.length; i++) for (var j = 0; j < Ls.length; j++) {
+    // A leak at or above the measured transmittance means that camera could not have
+    // produced this frame at any finite concentration — the upper bound is open.
+    if (T <= Ls[j] + 0.01) { open = true; continue; }
+    var c = concFromT(T, rg, ks[i], Ls[j]) * (dil || 1);
+    if (c < lo) lo = c;
+    if (c > hi) hi = c;
+  }
+  if (!isFinite(lo)) return null;
+  return { lo: lo, hi: hi, open: open };
 }
 
 // ---------------------------------------------------------------------------
@@ -746,9 +791,11 @@ function renderResult(r, px) {
   // 0.2 mg/L adequacy threshold. Publishing a bare "0.21 mg/L" would imply a precision
   // the method does not have, right where the number decides whether water is treated
   // as disinfected — so OTO numbers are shown as an interval.
-  var band = (rg.species === 'total' && !r.manual && !r.overRange)
+  var iv = (rg.species === 'total' && !r.manual && !r.overRange && r.T != null)
+    ? concInterval(r.T, rg, dilutionFactor()) : null;
+  var band = iv
     ? '<div style="font-size:13px;font-weight:600;color:var(--amber);margin-top:2px">provisional range ' +
-      fmt(r.conc * OTO_K_LO / OTO_K, 2) + '–' + fmt(r.conc * OTO_K_HI / OTO_K, 2) + ' mg/L</div>' : '';
+      fmt(iv.lo, 2) + '–' + fmt(iv.hi, 2) + (iv.open ? '+' : '') + ' mg/L</div>' : '';
   $('clResult').innerHTML = (r.overRange ? '&gt;' : '') + fmt(r.conc, 2) +
     ' <small style="font-size:18px;font-weight:400">mg/L</small>' +
     '<div style="font-size:13px;font-weight:600;color:var(--grey);margin-top:2px">' +
@@ -764,8 +811,12 @@ function renderResult(r, px) {
       ' · white ' + rg.channelName.charAt(0).toUpperCase() + '=' + fmt(px.ref, 1) + '</span>');
     st.push('Absorbance A = log₁₀(white/vial) = <span class="u">' + fmt(r.A, 4) + '</span>');
     var dil = dilutionFactor();
-    st.push(rg.speciesLabel + ' = ' + rg.k + ' × A' + (dil > 1 ? ' × ' + dil + ' (dilution)' : '') +
-      ' = <span class="u"><b>' + (r.overRange ? '&gt;' : '') + fmt(r.conc, 2) + ' mg/L</b></span>');
+    st.push(rg.leak
+      ? 'Leak-corrected: ' + rg.speciesLabel + ' = ' + rg.k + '×(1−' + rg.leak + ') × log₁₀((1−' + rg.leak +
+        ')/(T−' + rg.leak + ')), T=' + fmt(r.T, 3) + (dil > 1 ? ' × ' + dil : '') +
+        ' = <span class="u"><b>' + (r.overRange ? '&gt;' : '') + fmt(r.conc, 2) + ' mg/L</b></span>'
+      : rg.speciesLabel + ' = ' + rg.k + ' × A' + (dil > 1 ? ' × ' + dil + ' (dilution)' : '') +
+        ' = <span class="u"><b>' + (r.overRange ? '&gt;' : '') + fmt(r.conc, 2) + ' mg/L</b></span>');
   } else if (r.manual) {
     st.push('Manual comparator-card reading: <b>' + fmt(r.conc, 2) + ' mg/L</b> (' + rg.speciesLabel.toLowerCase() + ')');
   }
@@ -838,8 +889,10 @@ function renderResult(r, px) {
   lastReading = {
     reagent: rg.name, species: rg.species, speciesLabel: rg.speciesLabel, use: u.label,
     conc: r.conc, overRange: !!r.overRange, extrapolated: !!r.extrapolated,
-    concLo: (rg.species === 'total' && !r.manual && !r.overRange) ? parseFloat((r.conc * OTO_K_LO / OTO_K).toFixed(2)) : null,
-    concHi: (rg.species === 'total' && !r.manual && !r.overRange) ? parseFloat((r.conc * OTO_K_HI / OTO_K).toFixed(2)) : null,
+    concLo: iv ? parseFloat(iv.lo.toFixed(2)) : null,
+    concHi: iv ? parseFloat(iv.hi.toFixed(2)) : null,
+    concOpen: iv ? !!iv.open : false,
+    transmittance: (r.T != null && isFinite(r.T)) ? parseFloat(r.T.toFixed(4)) : null,
     band: c.band, bandLabel: c.label, manual: !!r.manual,
     dilution: dilutionFactor(), absorbance: (r.A != null && isFinite(r.A)) ? parseFloat(r.A.toFixed(4)) : null,
     chSample: px ? px.s : null, chWhite: px ? px.ref : null,

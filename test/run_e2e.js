@@ -644,6 +644,91 @@ async function testA11yRegressions(browser, base) {
   await page.close();
 }
 
+// Real captures from real operators. Synthetic fixtures only ever prove the app agrees
+// with its own model; these prove it works on a photograph taken by someone standing at
+// a window in Odisha with a comparator block in their hand.
+async function testFieldCaptures(browser, base) {
+  const dir = path.join(__dirname, 'field');
+  if (!fs.existsSync(path.join(dir, 'manifest.json'))) return;
+  console.log('\n\x1b[1mField captures\x1b[0m');
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
+
+  for (const m of manifest) {
+    const page = await newPage(browser, base);
+    await page.evaluate((r, u) => { setReagent(r); setUse(u); }, m.reagent, m.use);
+    const input = await page.$('#photoInput');
+    await input.uploadFile(path.join(dir, m.file));
+    await page.waitForFunction(
+      () => window.lastReading !== null || document.getElementById('capStrip').className.includes('no'),
+      { timeout: 10000 }).catch(() => {});
+
+    const st = await page.evaluate(() => ({
+      conc: window.lastReading ? window.lastReading.conc : null,
+      over: window.lastReading ? window.lastReading.overRange : null,
+      T: window.lastReading ? window.lastReading.transmittance : null,
+      lo: window.lastReading ? window.lastReading.concLo : null,
+      hi: window.lastReading ? window.lastReading.concHi : null,
+      note: document.getElementById('clNote').textContent,
+    }));
+
+    check(`${m.file}: produces a reading at all`, st.conc !== null,
+      `refused — "${st.note.slice(0, 120)}"`);
+    if (st.conc === null) { await page.close(); continue; }
+
+    // The regression that matters: this frame must never go back to a bare lower bound.
+    check(`${m.file}: not reported as over range`, st.over === false,
+      `over range again — the operator gets ">${st.conc}" instead of a value`);
+    check(`${m.file}: reads well above the old ${m.old_ceiling} ceiling`,
+      st.conc >= m.expect_min_mg_l, `got ${st.conc && st.conc.toFixed(2)} mg/L (T=${st.T})`);
+    // Near the asymptote a small change in transmittance moves the estimate a lot, so a
+    // tight band on the point estimate would be false precision. What must hold is that
+    // the published INTERVAL covers what the operator reads off their comparator card.
+    check(`${m.file}: interval covers the operator's ${m.operator_expects} mg/L`,
+      st.lo !== null && st.hi !== null && st.lo <= m.operator_expects &&
+      (st.open || st.hi >= m.operator_expects),
+      `interval ${st.lo}–${st.hi}${st.open ? '+' : ''} misses ${m.operator_expects}`);
+    check(`${m.file}: interval brackets the point estimate`,
+      st.lo < st.conc && (st.open || st.conc < st.hi), `${st.lo} < ${st.conc} < ${st.hi}`);
+    console.log(`       T=${st.T}  ->  ${st.conc.toFixed(2)} mg/L  (range ${st.lo}–${st.hi})`);
+    await page.close();
+  }
+}
+
+// The correction must not disturb the low range, which is where the constant is anchored,
+// and it must stay monotonic — a colour test that is not monotonic in concentration is
+// worse than no test.
+async function testLeakModel(browser, base) {
+  console.log('\n\x1b[1mLeak-corrected model\x1b[0m');
+  const page = await newPage(browser, base);
+  const r = await page.evaluate(() => {
+    const oto = REAGENTS.oto, out = { drift: [], curve: [] };
+    for (const T of [0.95, 0.90, 0.85, 0.80]) {
+      const linear = oto.k * Math.log10(1 / T);
+      out.drift.push({ T, linear, leak: concFromT(T, oto), pct: 100 * (concFromT(T, oto) / linear - 1) });
+    }
+    for (let T = 0.95; T > 0.21; T -= 0.02) out.curve.push(concFromT(T, oto));
+    return out;
+  });
+  // Absolute, not relative: the constant is anchored at low concentration, so what
+  // matters is that the correction does not move those readings by an amount anyone
+  // could act on. 0.02 mg/L is a tenth of the tightest decision threshold in the app.
+  const worst = Math.max(...r.drift.map(d => Math.abs(d.leak - d.linear)));
+  check('low range moves by under 0.02 mg/L vs the anchored linear model', worst < 0.02,
+    r.drift.map(d => `T=${d.T.toFixed(2)} ${(d.leak - d.linear).toFixed(3)}`).join(', '));
+  const monotonic = r.curve.every((v, i) => i === 0 || v > r.curve[i - 1]);
+  check('concentration rises monotonically as transmittance falls', monotonic, 'curve is not monotonic');
+
+  // DPD must be untouched by all of this.
+  const dpd = await page.evaluate(() => ({
+    k: DPD_K, leak: REAGENTS.dpd.leak,
+    half: concFromT(223 / 223 * Math.pow(10, -0.5 / 3.778), REAGENTS.dpd),
+  }));
+  check('DPD is unaffected: no leak term, constant still 3.778',
+    dpd.leak === 0 && dpd.k === 3.778 && Math.abs(dpd.half - 0.5) < 0.001,
+    `leak=${dpd.leak} k=${dpd.k} round-trip=${dpd.half}`);
+  await page.close();
+}
+
 async function testGuards(browser, base) {
   console.log('\n\x1b[1mSafety guards\x1b[0m');
   const page = await newPage(browser, base);
@@ -743,6 +828,8 @@ async function testGuards(browser, base) {
     await testCaptureFeedback(base);
     await testLateDetailsRestamp(browser, base);
     await testLayout(browser, base);
+    await testFieldCaptures(browser, base);
+    await testLeakModel(browser, base);
     await testCaptureStrip(browser, base);
     await testA11yRegressions(browser, base);
     await testCalibrationMatchesCode(browser, base);

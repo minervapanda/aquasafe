@@ -15,7 +15,7 @@ own site, with two additions: **OTO reagent support** and **PDF report download*
 | Colour | pink | yellow |
 | Channel read | green | blue |
 | Measures | **free** chlorine | **total** chlorine (free + combined) |
-| Calibrated range | 0.1 – 1.0 mg/L, fitted | 0.2 – 1.0 mg/L, **provisional ±40 %** |
+| Calibrated range | 0.1 – 1.0 mg/L, fitted | 0.2 – 3 mg/L, **provisional ±40 %** |
 | Can demonstrate compliance? | yes | **no** — see below |
 
 ## The one thing to understand before using OTO
@@ -129,10 +129,36 @@ the constants in `aquasafe.js` so the record and the code cannot drift apart.
 * The load-bearing weakness is an **inferred** ε₄₃₈ ≈ 5 × 10⁴, bracketed 3.5–7 × 10⁴. Since
   k scales as 1/ε, that is ±40 % on the constant, and it straddles the 0.2 mg/L adequacy
   threshold in *both* directions. Hence the published interval.
-* Above the gate the method under-reports badly — roughly −34 % at 2 mg/L and −64 % at
-  5 mg/L — because the blue channel does not bottom out, it *plateaus* on ~17 % spectral
-  leak. Under-reporting chlorine is the false-safe direction, which is why crossing the
-  gate suppresses the number entirely rather than softening it.
+* The blue channel does not bottom out on a strong yellow, it **plateaus**, because ~17 %
+  of the channel's response sits where the dye barely absorbs. v1 fenced that off with a
+  gate at ~1 mg/L and printed `>1.01` beyond it. **A field capture from Khordha, Odisha
+  showed why that was the wrong call** — see below. The leak is now *corrected* rather
+  than fenced off, `c = k(1−L)·log₁₀((1−L)/(T−L))` with L = 0.17, which leaves the low
+  range untouched (under 0.02 mg/L drift) and moves the usable ceiling to ~3 mg/L. Past
+  T = 0.21 (~4.4 mg/L) the dye has absorbed everything the channel can reach and the app
+  still refuses a number.
+
+### The Khordha capture
+
+An operator photographed a real OTO vial in a translucent comparator block, backlit
+through a window, and the app answered `>1.01 mg/L`. Their reply: *"It should show value
+upto 3 ..but showing above 1."*
+
+They were right, and the interesting part is that **nothing was wrong with the reading**.
+The white reference resolved correctly to the block (B = 200, not the bright window), and
+the capture geometry — backlit translucent block behind the vial — is a perfectly sound
+diffuse-transmission setup. Transmittance came out at 0.23. The model computed a real
+number and the gate threw it away.
+
+Indian distribution water is routinely dosed to 2–3 mg/L, so a ceiling at 1 mg/L makes
+the tool useless to the people it was built for. That frame now reads **3.79 mg/L, range
+2.3–5.4+**, and lives in `test/field/` as a permanent regression test: if it ever returns
+to reporting a bare lower bound, the suite fails.
+
+The interval is wide, and honestly so — near the asymptote a small change in transmittance
+moves the estimate a lot. That is what the interval is for, and it is why the fix for this
+operator is not a better constant but **their own comparator card**: photograph it, run
+`test/fit_oto_calibration.py`, and the ±40 % collapses.
 
 To replace the prior with a real fit, `test/fit_oto_calibration.py` photographs an OTO
 comparator card and fits through the origin exactly as the DPD constant was fitted.

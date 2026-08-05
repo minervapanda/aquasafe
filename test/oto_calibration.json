@@ -39,14 +39,24 @@
   "range": {
     "quantitative_mg_l": [
       0.2,
-      1.0
+      3.0
     ],
     "camera_detection_floor_mg_l": 0.22,
     "floor_rationale": "Measured against the app own yellow detector: below about 0.22 mg/L the OTO yellow is too faint for a camera to separate from white paper (it fails the (R-B)>30 test), so the app REFUSES rather than guessing. The synthesis proposed a 0.1-0.2 semi-quantitative band; that is achievable by eye against a comparator disc but NOT by this method, and claiming it would invite a fabricated reading at the exact concentration where a false pass is most dangerous. The floor and the quantitative lower bound coincide at ~0.2 mg/L, which is convenient but not engineered.",
-    "over_range_above_mg_l": 1.0,
-    "gate_rationale": "Gate on TRANSMITTANCE (sample/reference), not on the raw channel code and not on computed mg/L. Not mg/L, because the concentration at which the response flattens depends on absorptivity and path length, neither of which the app knows. Not the raw code either: an absolute floor of 125 fires at 0.32 mg/L against a dim reference and 1.24 mg/L against a bright one, a 4x swing driven purely by exposure. Saturation is a ratio phenomenon, so the gate must be a ratio. T = 0.56 is where the +/-15% accuracy ceiling lands across a wide sweep of absorptivity and path length; at k=4.0 it corresponds to 4.0*log10(1/0.56) = 1.01 mg/L.",
+    "over_range_above_mg_l": 4.37,
+    "gate_rationale": "Gate on TRANSMITTANCE, and at the LEAK ASYMPTOTE rather than at the bend. v1 gated at T=0.56 (~1.0 mg/L), the point where the plain linear model starts under-reading. A real capture from Khordha, Odisha showed why that was wrong in the field: Indian distribution water is routinely dosed to 2-3 mg/L, the app measured a perfectly sound T=0.289 and printed only \">1.01 mg/L\", which tells an operator nothing. Correcting the leak instead of fencing it off moves the useful ceiling to ~3 mg/L and the hard gate to T=0.21 (~4.4 mg/L), where T approaches L and no signal remains at all.",
     "gate_implied_ceiling": "At k=4.0 and B_white=223 the gate fires at 4.0*log10(223/125) = 1.005 mg/L. The app derives the published lower bound from the gate and the actual white reference of each photo, so the two can never drift apart.",
-    "transmittance_gate": 0.56
+    "transmittance_gate": 0.21,
+    "model": "leak-corrected: c = k(1-L)*log10((1-L)/(T-L)), L=0.17",
+    "leak": 0.17,
+    "leak_device_range": [
+      0.075,
+      0.317
+    ],
+    "leak_interval_band": [
+      0.12,
+      0.24
+    ]
   },
   "why_it_saturates": {
     "summary": "The blue channel does NOT bottom out at 0. It PLATEAUS, and a linear model built on it UNDER-REPORTS \u2014 the dangerous direction.",
@@ -106,13 +116,13 @@
   ],
   "test_points_mg_l": [
     0.25,
-    0.4,
     0.6,
-    0.9
+    1.5,
+    2.8
   ],
   "over_range_test_points_mg_l": [
-    1.5,
-    3.0
+    6.0,
+    10.0
   ],
   "below_floor_test_points_mg_l": [
     0.15
@@ -136,5 +146,13 @@
       "isp_colour_matrix": "Phone JPEG pipelines apply a 3x3 colour-correction matrix with large negative off-diagonals. For a neutral card the off-diagonals cancel; for a saturated yellow they do not, and the blue row is typically the most aggressive. This does not cancel in the DPD-to-OTO ratio and is not bounded by the +/-40% bracket, so the stated ~14% cross-camera scatter is an underestimate of unknown size.",
       "temperature": "The classical method wants sample below 20 C, which is unsatisfiable in 30-35 C Indian surface water. The app records temperature but does not gate on it."
     }
+  },
+  "field_evidence": {
+    "capture": "Khordha, Odisha, 2026-08-05 07:31 GMT+5.5 \u2014 OTO vial in a translucent white comparator block, backlit through a window",
+    "measured": "B_white 201, B_sample 58, T = 0.289",
+    "v1_linear_model": "2.16 mg/L, suppressed by the T=0.56 gate and printed as \">1.01 mg/L\"",
+    "v2_leak_corrected": "2.80 mg/L, consistent with the operator's report that the value should read up to 3",
+    "note": "The capture geometry was sound, not a user error: a backlit translucent block behind the vial is a legitimate diffuse-transmission photometer setup, and the reference resolved to the block (201) rather than to the window. The defect was entirely in the reporting ceiling.",
+    "fixture": "test/field/khordha-oto.png \u2014 kept as a permanent regression test"
   }
 }

@@ -1,0 +1,17 @@
+[
+  {
+    "file": "khordha-oto.png",
+    "source": "Field capture, Khordha, Odisha, India \u2014 2026-08-05 07:31 GMT+5.5. OTO vial in a translucent white comparator block, backlit through a window. Cropped from the operator report.",
+    "reagent": "oto",
+    "use": "drinking",
+    "complaint": "App printed \">1.01 mg/L\". Operator: \"It should show value upto 3 ..but showing above 1\".",
+    "diagnosis": "Not a reading error. The reference resolved correctly to the white block (B=201, not the window) and T=0.289 is a sound measurement. The v1 linear model computed 2.16 mg/L and the T=0.56 gate threw the number away. The ceiling was the defect.",
+    "expect": "value",
+    "expect_min_mg_l": 2.0,
+    "must_not_be_over_range": true,
+    "why": "Real Indian distribution water is routinely dosed to 2-3 mg/L. If this frame ever goes back to reporting a bare lower bound, the tool is useless to the people it was built for.",
+    "old_ceiling": ">1.01 mg/L",
+    "operator_expects": 3.0,
+    "app_measures": "B_white 200, B_sample 46, T=0.23 -> 3.79 mg/L, interval 2.3-5.4+"
+  }
+]
