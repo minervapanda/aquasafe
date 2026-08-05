@@ -218,6 +218,29 @@ Aquasafe is a **screening aid**, not a laboratory analysis.
 * Confirm anything that drives a public-health decision against a comparator card or a bench
   photometer.
 
+### Follows the PHED field protocol
+
+The operators this is built for work to the PHED *Orthotolidine (OTO) Total Chlorine
+Method* standard reference, and where that document conflicts with the classical
+literature it wins — it is what they are trained on and audited against.
+
+The one that matters: **PHED requires the colour to be read immediately after mixing**,
+because it keeps rising and a delayed read over-reports. Classical Standard Methods says
+the opposite for *total* chlorine — free reacts in seconds, chloramines develop over five
+minutes. An early build of this app enforced the classical convention and refused any
+photo taken before 4:30, which told a PHED operator to do the opposite of their own
+procedure. The timer now never blocks an early read; it warns past two minutes and
+refuses past ten, which is the direction the protocol actually warns about. Reading
+immediately under-develops chloramines, so the value sits nearer free chlorine — a
+*tighter* upper bound, so the never-a-pass invariant still holds.
+
+The app also names the patch on the PHED card that a reading falls in — "bright yellow
+patch (2.0–3.0 mg/L)" — so the number and the card in the operator's hand can be checked
+against each other. The printed patches leave gaps, so a reading between two of them says
+so rather than claiming a patch. The swatches are used for naming only, never as
+calibration points: they are idealised sRGB (two of them have blue = 0, which is
+uncalibratable).
+
 ### OTO-specific
 
 Aquasafe implements the classical **acid** o-tolidine test (final pH 1–3), whose product is

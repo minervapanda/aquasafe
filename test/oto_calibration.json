@@ -154,5 +154,41 @@
     "v2_leak_corrected": "2.80 mg/L, consistent with the operator's report that the value should read up to 3",
     "note": "The capture geometry was sound, not a user error: a backlit translucent block behind the vial is a legitimate diffuse-transmission photometer setup, and the reference resolved to the block (201) rather than to the window. The defect was entirely in the reporting ceiling.",
     "fixture": "test/field/khordha-oto.png \u2014 kept as a permanent regression test"
+  },
+  "phed_standard_reference": {
+    "document": "~/Downloads/OTO_Chlorine_Field_Protocol.pdf \u2014 \"Water Quality Field Protocol, PUBLIC HEALTH ENGINEERING DEPARTMENT (PHED) STANDARD REFERENCE, Orthotolidine (OTO) Total Chlorine Method\" (AquaDose Pro digital reference manual series). This is the procedure the operators are trained on and audited against; where it conflicts with the classical literature, it wins.",
+    "visual_scale": [
+      {
+        "range": "0.0-0.5",
+        "label": "Clear / faint"
+      },
+      {
+        "range": "1.0-1.5",
+        "label": "Light yellow"
+      },
+      {
+        "range": "2.0-3.0",
+        "label": "Bright yellow"
+      },
+      {
+        "range": "4.0-5.0",
+        "label": "Dark yellow"
+      },
+      {
+        "range": "10.0+",
+        "label": "Orange / brown"
+      }
+    ],
+    "scale_note": "The printed patches leave gaps (0.5-1.0, 1.5-2.0, 3.0-4.0, 5.0-10). The app names the patch a reading falls in, and says \"between\" when it lands in a gap rather than claiming a patch. The swatches in the PDF are idealised sRGB (they are literally the CSS named colours ivory/lemonchiffon/gold/darkorange/sienna, and gold and darkorange have B=0, which is uncalibratable) so they are used for BAND NAMING ONLY, never as photometric calibration points.",
+    "reaction_time_CONFLICT": {
+      "phed_says": "\"Color development must be evaluated immediately after reagent mixing to prevent overestimation of residual levels due to delayed reactions.\"",
+      "classical_says": "Standard Methods / JIS: free chlorine reacts in <15 s, combined chlorine develops over ~5 min, so a TOTAL chlorine reading is taken at 5 minutes and within 10.",
+      "resolution": "The app follows PHED. An earlier build enforced the 5-minute convention and REFUSED any photo before 4:30, which instructed a PHED operator to do the opposite of their own protocol and, per that protocol, to over-report. The timer now never blocks an early read; it warns past 2 minutes and refuses past 10, which is the direction PHED warns about.",
+      "safety_consequence": "Reading immediately under-develops chloramines, so the value sits nearer FREE chlorine than total. That makes it a TIGHTER upper bound on free chlorine, not a looser one, so the invariant the safety logic rests on (total >= free, never render OTO as a pass) still holds."
+    },
+    "other_notes_honoured": {
+      "total_only": "\"OTO solely yields the Total Chlorine value... the DPD method should be implemented\" where free vs combined matters \u2014 this is exactly the never-a-pass invariant.",
+      "turbidity": "\"High raw river water turbidity can interfere with visual colorimetric comparison.\" Still an open v2 gap: the app has no sample blank."
+    }
   }
 }

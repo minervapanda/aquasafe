@@ -78,6 +78,36 @@ var OTO_LEAK_LO = 0.12, OTO_LEAK_HI = 0.24;
 var OTO_K_LO = 2.9, OTO_K_HI = 5.7;
 var OTO_CAL_NOTE = 'Provisional constant (±40%), reasoned from the DPD calibration rather than fitted, with a leak correction above ~1 mg/L — usable 0.2–3 mg/L, refused past ~4.4.';
 
+// The visual scale in the PHED "Orthotolidine (OTO) Total Chlorine Method" standard
+// reference — the card the field operator is holding while they use this app. Reporting
+// only a decimal number makes the app and the card talk past each other; naming the patch
+// lets the operator cross-check the two in the field, which is the whole point of a
+// screening aid. Note the printed patches leave gaps (0.5-1.0, 1.5-2.0, 3.0-4.0, 5.0-10),
+// so a reading can legitimately fall between two patches and is reported that way.
+var OTO_CARD = [
+  { lo: 0.0, hi: 0.5, label: 'Clear / faint' },
+  { lo: 1.0, hi: 1.5, label: 'Light yellow' },
+  { lo: 2.0, hi: 3.0, label: 'Bright yellow' },
+  { lo: 4.0, hi: 5.0, label: 'Dark yellow' },
+  { lo: 10.0, hi: Infinity, label: 'Orange / brown' }
+];
+function otoCardBand(c) {
+  var i, b;
+  for (i = 0; i < OTO_CARD.length; i++) {
+    b = OTO_CARD[i];
+    if (c >= b.lo && c <= b.hi) {
+      return b.label + ' patch (' + b.lo + (isFinite(b.hi) ? '–' + b.hi : '+') + ' mg/L)';
+    }
+  }
+  for (i = 0; i < OTO_CARD.length - 1; i++) {
+    if (c > OTO_CARD[i].hi && c < OTO_CARD[i + 1].lo) {
+      return 'between the ' + OTO_CARD[i].label.toLowerCase() + ' and ' +
+             OTO_CARD[i + 1].label.toLowerCase() + ' patches';
+    }
+  }
+  return null;
+}
+
 var reagentId = 'dpd', useId = 'drinking';
 var camStream = null, roiTimer = null, lastGeo = null, lastReading = null, lastResult = null;
 var lastCapture = null;   // frozen copy of the captured frame, for re-stamping
@@ -153,7 +183,7 @@ var REAGENTS = {
     sop: ['Collect <b>10 mL</b> of sample in a clean clear vial.',
           'Add the <b>acid OTO</b> reagent (usually 3–4 drops); cap and invert — a <b>yellow</b> colour develops.',
           'If the colour is <b>blue-green</b> the reagent is under-acidified or stale; if it is <b>orange/brown</b> the chlorine is in excess. Neither can be read — re-run or dilute.',
-          'Read <b>within about a minute</b> — the colour keeps rising as combined chlorine develops, and it is unstable after 10 minutes.',
+          'Photograph <b>immediately</b> after mixing — PHED protocol. Delay lets the colour keep rising and <b>over-reports</b> the residual.',
           'Hold the vial against a <b>pure white</b> card and fill the outline; tap the shutter.'],
     chips: ['1 · Fill 10 mL', '2 · Add OTO', '3 · Photograph', '4 · Result']
   }
@@ -457,19 +487,34 @@ function syncReagentUI() {
 // measurement, not a nicety. The timer is optional — a field user with a photo already
 // on the phone can still get a reading — but an untimed reading is labelled as such
 // everywhere it appears, and a timed one outside the window is refused.
-var OTO_READ_MIN_S = 270, OTO_READ_MAX_S = 600, OTO_TARGET_S = 300;
+// PHED's own standard reference is explicit: "Color development must be evaluated
+// IMMEDIATELY after reagent mixing to prevent OVERESTIMATION of residual levels due to
+// delayed reactions."
+//
+// An earlier version of this app enforced the classical Standard Methods convention
+// instead — free chlorine at <15 s, total at 5 min — and REFUSED any photo before 4:30.
+// That told a PHED operator to do the opposite of their own protocol, and per that
+// protocol to over-report. The document wins: it is the procedure these users are
+// trained on and audited against.
+//
+// So the timer never blocks an early read. It only flags a LATE one, which is the
+// direction the protocol warns about. (The tension is real and is recorded in
+// test/oto_calibration.json: reading immediately under-develops chloramines, so the
+// value sits nearer free chlorine than total. That keeps "an upper bound on free
+// chlorine" true, which is the claim the safety logic rests on.)
+var OTO_LATE_WARN_S = 120, OTO_LATE_HARD_S = 600;
 var otoTimerStart = null, otoTimerTick = null;
 function toggleTimer() {
   if (otoTimerStart) { stopTimer(); return; }
   otoTimerStart = Date.now();
-  $('timerBtn').textContent = '■ Reset timer';
+  $('timerBtn').textContent = '■ Reset';
   otoTimerTick = setInterval(paintTimer, 250);
   paintTimer();
 }
 function stopTimer() {
   otoTimerStart = null;
   if (otoTimerTick) { clearInterval(otoTimerTick); otoTimerTick = null; }
-  $('timerBtn').textContent = '▶ Reagent added — start 5:00';
+  $('timerBtn').textContent = '▶ Reagent added';
   $('timerFace').textContent = '—:—';
   $('timerFace').style.color = 'var(--grey)';
   $('timerNote').textContent = 'Optional, but a reading with no recorded reaction time is marked as such on the report.';
@@ -479,15 +524,15 @@ function paintTimer() {
   var e = elapsedS(); if (e === null) return;
   var face = $('timerFace');
   face.textContent = Math.floor(e / 60) + ':' + ('0' + Math.floor(e % 60)).slice(-2);
-  if (e < OTO_READ_MIN_S) {
-    face.style.color = 'var(--amber)';
-    $('timerNote').textContent = 'Wait until 4:30 before photographing — the combined-chlorine colour is still developing.';
-  } else if (e <= OTO_READ_MAX_S) {
+  if (e <= OTO_LATE_WARN_S) {
     face.style.color = 'var(--green)';
-    $('timerNote').textContent = 'In the read window (4:30–10:00). Photograph now.';
+    $('timerNote').textContent = 'Photograph now. PHED protocol: read immediately after mixing.';
+  } else if (e <= OTO_LATE_HARD_S) {
+    face.style.color = 'var(--amber)';
+    $('timerNote').textContent = 'Over 2 minutes since mixing — the colour keeps rising, so the reading will run high. Photograph now and treat it as an over-estimate.';
   } else {
     face.style.color = 'var(--red)';
-    $('timerNote').textContent = 'Past 10 minutes — the colour keeps rising and will over-read. Re-run the test with fresh reagent.';
+    $('timerNote').textContent = 'Over 10 minutes — the colour has drifted too far to read. Make a fresh test.';
   }
   if (typeof checkROI === 'function' && camStream) checkROI();
 }
@@ -495,10 +540,10 @@ function paintTimer() {
 function timingGate() {
   var rg = R(); if (rg.species !== 'total') return null;
   var e = elapsedS(); if (e === null) return null;
-  if (e < OTO_READ_MIN_S) return { shortMsg: 'Wait until 4:30 — colour still developing',
-    longMsg: '<b>Too early.</b> Only ' + Math.floor(e) + ' s have elapsed. Acid OTO needs about 5 minutes for combined chlorine to develop; a photo now measures something between free and total chlorine and matches neither. Wait for the timer to reach 4:30.' };
-  if (e > OTO_READ_MAX_S) return { shortMsg: 'Past 10:00 — colour has drifted',
-    longMsg: '<b>Too late.</b> ' + Math.floor(e / 60) + ' minutes have elapsed. The OTO colour keeps rising for hours, so a reading this late over-reports. Re-run the test with fresh reagent.' };
+  // Never refuse an EARLY read — PHED asks for exactly that. Only a very late one is
+  // refused, and that is the direction the protocol warns about.
+  if (e > OTO_LATE_HARD_S) return { shortMsg: 'Over 10 minutes since mixing',
+    longMsg: '<b>Too late to read.</b> ' + Math.floor(e / 60) + ' minutes have elapsed since the reagent went in. The OTO colour keeps rising for hours, so a reading this late over-reports — which is the error the PHED protocol warns about. Make a fresh test and photograph it straight away.' };
   return null;
 }
 
@@ -567,7 +612,7 @@ function gateReasons(s) {
   }
   if (s.offChannel && s.offChannel.suspect) return { ok: false,
     shortMsg: 'Colour is not a clean yellow — check the reagent',
-    longMsg: '<b>Unexpected colour development.</b> The vial is absorbing red light as well as blue, so it is not the clean yellow that OTO produces in properly acidified sample. That happens when the reagent is under-acidified or stale (a blue-green tinge develops) or when chlorine is in large excess (the colour runs orange to brown). Either way the calibration does not apply and a number here would read LOW. Re-run the test with fresh reagent, and dilute the sample if it looked orange.' };
+    longMsg: '<b>Off the yellow scale.</b> The vial is absorbing red light as well as blue, so it is not the clean yellow this calibration covers. If it looks <b>orange or brown</b> that is the top of the PHED card — <b>10 mg/L or more</b> of chlorine, far above what a photo can resolve: dilute 1:1 with chlorine-free water, set the dilution below, and photograph again. If it looks <b>blue-green</b> instead, the reagent is under-acidified or stale, or it is the neutral (IS 3025 Part 26) variant this app cannot read — make a fresh test with acid OTO.' };
   return { ok: true };
 }
 
@@ -704,7 +749,8 @@ function capResult(r, rg, u, c) {
              : fmt(r.conc, 2) + ' <small>mg/L</small>');
   var say = over
     ? 'The colour has saturated, so the true value is higher than this. Dilute 1:1, set <b>Dilution</b> in step 3, and photograph again.'
-    : (isOto ? '<b>Total</b> chlorine, provisional range · OTO. This does <b>not</b> confirm free chlorine — see the full result.'
+    : (isOto ? '<b>Total</b> chlorine · OTO' + (r.cardBand ? ' · PHED card: <b>' + esc(r.cardBand) + '</b>' : '') +
+               '. This does <b>not</b> confirm free chlorine — see the full result.'
              : esc(rg.speciesLabel) + ' · ' + esc(rg.name) + '. Full result and guidance are in the card below.');
   var spoken = over
     ? 'Over range. More than ' + fmt(r.conc, 2) + ' milligrams per litre. The true value is higher. Dilute the sample and test again.'
@@ -827,9 +873,11 @@ function renderResult(r, px) {
 
   var note;
   if (rg.species === 'total') {
+    var cardBand = otoCardBand(r.conc);
     note = c.band === 'zero'
       ? 'No chlorine of any kind — see the alert.'
-      : 'Total chlorine is ' + fmt(r.conc, 2) + ' mg/L. Free (disinfecting) chlorine is somewhere between 0 and this value.';
+      : 'Total chlorine is ' + (r.overRange ? 'over ' : '') + fmt(r.conc, 2) + ' mg/L. Free (disinfecting) chlorine is somewhere between 0 and this value.' +
+        (cardBand ? ' On the PHED OTO card this is the ' + cardBand + ' — check it against the card in your hand.' : '');
     if (c.band === 'high') note += ' This exceeds the ' + u.max + ' mg/L guideline for ' + u.label.toLowerCase() + ' — reduce dosing.';
   } else {
     note = { zero: 'No disinfection — see the alert.',
@@ -900,6 +948,7 @@ function renderResult(r, px) {
     hoclFraction: (hoclF !== null ? parseFloat(hoclF.toFixed(3)) : null),
     activeCl: (activeCl !== null ? parseFloat(activeCl.toFixed(2)) : null),
     reactionS: (rg.species === 'total' && !r.manual) ? (elapsedS() === null ? null : Math.round(elapsedS())) : undefined,
+    cardBand: rg.species === 'total' ? otoCardBand(r.conc) : null,
     site: ($('siteName').value || '').trim(),
     lat: lastGeo ? lastGeo.lat : null, lon: lastGeo ? lastGeo.lon : null,
     ts: new Date().toISOString()
@@ -996,7 +1045,7 @@ function csvCell(v) {
 function exportHistory() {
   var log = loadLog(); if (!log.length) return;
   var head = ['timestamp', 'date', 'time', 'sample_point', 'reagent', 'species', 'chlorine_mg_L',
-    'over_range', 'range_lo_mg_L', 'range_hi_mg_L', 'verdict', 'use', 'dilution', 'reaction_time_s', 'absorbance', 'channel_sample', 'channel_white',
+    'over_range', 'range_lo_mg_L', 'range_hi_mg_L', 'phed_card_band', 'verdict', 'use', 'dilution', 'reaction_time_s', 'absorbance', 'channel_sample', 'channel_white',
     'temperature_C', 'pH', 'cyanuric_acid_mg_L', 'hocl_fraction', 'active_chlorine_mg_L',
     'latitude', 'longitude', 'source'];
   var lines = [head.map(csvCell).join(',')];
@@ -1004,7 +1053,7 @@ function exportHistory() {
     var d = new Date(r.ts);
     lines.push([r.ts, d.toLocaleDateString(APP_LOCALE), d.toLocaleTimeString(APP_LOCALE), r.site || '',
       r.reagent || 'DPD', r.speciesLabel || 'Free chlorine', fmt(r.conc, 2), r.overRange ? 'yes' : 'no',
-      r.concLo != null ? r.concLo : '', r.concHi != null ? r.concHi : '',
+      r.concLo != null ? r.concLo : '', r.concHi != null ? r.concHi : '', r.cardBand || '',
       r.bandLabel || '', r.use || '', r.dilution != null ? r.dilution : '',
       r.reactionS != null ? r.reactionS : (r.species === 'total' ? 'not recorded' : ''),
       r.absorbance != null ? r.absorbance : '', r.chSample != null ? fmt(r.chSample, 1) : '',
@@ -1142,12 +1191,13 @@ function buildReportDoc() {
     method.push(['Absorbance A = log10(white/vial)', fmt(r.absorbance, 4)]);
     method.push(['Calibration', rg.speciesLabel + ' = ' + rg.k + ' x A' + (r.dilution > 1 ? '  x ' + r.dilution + ' (dilution)' : '')]);
   }
+  if (r.cardBand) method.push(['PHED OTO card', r.cardBand]);
   method.push(['Dilution', r.dilution > 1 ? '1:' + (r.dilution - 1) + ' with chlorine-free water (x' + r.dilution + ')' : 'undiluted']);
   if (r.species === 'total' && !r.manual) {
     method.push(['Reaction time', r.reactionS == null
-      ? 'NOT RECORDED - species between free and total'
+      ? 'not recorded'
       : Math.floor(r.reactionS / 60) + ' min ' + (r.reactionS % 60) + ' s' +
-        (r.reactionS >= 270 && r.reactionS <= 600 ? ' (in the 4:30-10:00 window)' : ' (OUTSIDE the read window)')]);
+        (r.reactionS <= 120 ? ' (read promptly, per PHED protocol)' : ' - DELAYED, reads high')]);
   }
   if (r.temp != null) method.push(['Water temperature', fmt(r.temp, 1) + ' °C']);
   if (r.ph != null) method.push(['pH', fmt(r.ph, 2)]);
@@ -1172,10 +1222,11 @@ function buildReportDoc() {
       'methods even with perfect optics - roughly 90% of true for hypochlorite and inorganic chloramines, and as little ' +
       'as 50% for organic chloramines and real chlorinated pool water. Both errors point the same way as the total-vs-free ' +
       'problem: toward false reassurance.' });
-    if (r.reactionS == null) {
+    if (r.reactionS != null && r.reactionS > 120) {
       notes.push({ bold: true, rgb: [0.55, 0.27, 0],
-        text: 'Reaction time was not recorded. Acid OTO read within seconds shows approximately FREE chlorine; read at ' +
-          'five minutes it shows TOTAL. An untimed photograph measures neither quantity cleanly.' });
+        text: 'Read ' + Math.floor(r.reactionS / 60) + ' min ' + (r.reactionS % 60) + ' s after mixing. The PHED protocol ' +
+          'requires the colour to be evaluated immediately, because it keeps rising and a delayed reading OVER-reports ' +
+          'the residual. Treat this figure as an over-estimate.' });
     }
   } else if (r.species === 'total') {
     notes.push({ heading: 'Interpretation', bold: true, rgb: [0.63, 0, 0],

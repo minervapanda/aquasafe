@@ -729,6 +729,66 @@ async function testLeakModel(browser, base) {
   await page.close();
 }
 
+// Conformance with the PHED "Orthotolidine (OTO) Total Chlorine Method" standard
+// reference — the document the operators are trained on. An earlier build enforced the
+// classical Standard Methods 5-minute convention instead and refused any photo taken
+// before 4:30, which told a PHED user to do the opposite of their own protocol.
+async function testPhedProtocol(browser, base) {
+  console.log('\n\x1b[1mPHED protocol conformance\x1b[0m');
+  const page = await newPage(browser, base);
+  await page.evaluate(() => setReagent('oto'));
+
+  // "Color development must be evaluated immediately after reagent mixing."
+  const sop = await page.evaluate(() => document.getElementById('sopBox').textContent);
+  check('SOP tells the operator to read immediately', /immediately/i.test(sop) &&
+    !/wait until|4:30|5 minutes|5:00/i.test(sop), sop.slice(0, 200));
+
+  // An immediate read must never be refused.
+  const early = await page.evaluate(() => {
+    toggleTimer();                       // reagent added right now
+    return { gate: timingGate(), note: document.getElementById('timerNote').textContent };
+  });
+  check('an immediate read is not refused', early.gate === null,
+    `refused: ${early.gate && early.gate.shortMsg}`);
+  check('timer guidance points at photographing now', /photograph now/i.test(early.note), early.note);
+
+  // "...to prevent overestimation of residual levels due to delayed reactions."
+  // A late read is the direction the protocol warns about, so it must be flagged.
+  const late = await page.evaluate(() => {
+    window.otoTimerStart = Date.now() - 200 * 1000; paintTimer();
+    const warn = document.getElementById('timerNote').textContent;
+    window.otoTimerStart = Date.now() - 900 * 1000;
+    return { warn, gate: timingGate() };
+  });
+  check('a delayed read is warned about as an over-estimate',
+    /rising|high|over-?estimate/i.test(late.warn), late.warn);
+  check('a very late read is refused, naming over-reporting',
+    late.gate !== null && /over-?report/i.test(late.gate.longMsg),
+    late.gate ? late.gate.longMsg.slice(0, 100) : 'not refused');
+  await page.evaluate(() => stopTimer());
+
+  // The card's own bands, so the app and the card in the operator's hand agree.
+  const bands = await page.evaluate(() => ({
+    faint: otoCardBand(0.3), light: otoCardBand(1.2), bright: otoCardBand(2.5),
+    dark: otoCardBand(4.5), high: otoCardBand(12), gap: otoCardBand(3.5),
+  }));
+  check('0.3 mg/L maps to the clear/faint patch', /clear \/ faint/i.test(bands.faint), bands.faint);
+  check('2.5 mg/L maps to the bright yellow patch', /bright yellow/i.test(bands.bright), bands.bright);
+  check('12 mg/L maps to the orange/brown patch', /orange \/ brown/i.test(bands.high), bands.high);
+  // The printed card has gaps between patches; claiming a patch there would be false.
+  check('a value between printed patches says so', /between/i.test(bands.gap), bands.gap);
+
+  // Orange/brown means 10+ mg/L on the card, not a reagent fault.
+  const off = await page.evaluate(() => {
+    setReagent('oto');
+    return gateReasons({ detected: true, sample: 40, ref: 200, overFrac: 0,
+      offChannel: { suspect: true, aRed: 0.3, aBlue: 0.7 } }).longMsg;
+  });
+  check('orange/brown is explained as very high chlorine, not bad reagent',
+    /10 mg\/L or more/i.test(off) && /dilute/i.test(off), off.slice(0, 140));
+  await page.close();
+}
+
 async function testGuards(browser, base) {
   console.log('\n\x1b[1mSafety guards\x1b[0m');
   const page = await newPage(browser, base);
@@ -828,6 +888,7 @@ async function testGuards(browser, base) {
     await testCaptureFeedback(base);
     await testLateDetailsRestamp(browser, base);
     await testLayout(browser, base);
+    await testPhedProtocol(browser, base);
     await testFieldCaptures(browser, base);
     await testLeakModel(browser, base);
     await testCaptureStrip(browser, base);
