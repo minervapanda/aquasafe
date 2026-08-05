@@ -166,41 +166,10 @@
   <p class="sr-only" id="capLive" role="status" aria-live="polite" aria-atomic="true"></p>
 
   <div class="card">
-    <h2>1 · Reagent &amp; use</h2>
-
-    <label>Which reagent is in the vial?</label>
-    <div class="seg" id="segReagent">
-      <button type="button" id="rgDpd" class="on" onclick="setReagent('dpd')">DPD <small>pink · free chlorine</small></button>
-      <button type="button" id="rgOto" onclick="setReagent('oto')">OTO <small>yellow · total chlorine</small></button>
-    </div>
-    <div class="note" id="reagentNote"></div>
-
-    <label>What is being tested?</label>
-    <div class="seg" id="segUse">
-      <button type="button" id="useDrink" class="on" onclick="setUse('drinking')">Drinking water <small>IS 10500 / WHO</small></button>
-      <button type="button" id="usePool" onclick="setUse('pool')">Swimming pool <small>WHO / MAHC</small></button>
-    </div>
-
+    <h2>1 · Take the test</h2>
     <div class="sop" id="sopBox"></div>
-
-    <!-- OTO only: what the reagent measures depends on WHEN you read it, so the app
-         records the reaction time instead of hoping the user got it right. -->
-    <div class="sop" id="timerBox" style="display:none;background:#fff8e0;border:1px solid #f0cf8a">
-      <b>Reaction timer</b> — acid OTO read at a few seconds shows roughly <i>free</i> chlorine;
-      read at <b>5 minutes</b> it shows <i>total</i> chlorine, which is what this mode reports.
-      <div class="btn2" style="margin-top:8px">
-        <button id="timerBtn" onclick="toggleTimer()" style="background:var(--teal);color:#fff;border:none">▶ Reagent added — start 5:00</button>
-        <div id="timerFace" style="flex:1;text-align:center;font-size:22px;font-weight:800;
-             padding:12px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--grey)">—:—</div>
-      </div>
-      <div class="note" id="timerNote" style="margin-top:6px">Optional, but a reading with no recorded reaction time is marked as such on the report.</div>
-    </div>
-
-  </div>
-
-  <div class="card">
-    <h2>2 · Photograph the vial</h2>
     <div class="stepchip" id="stepChips"></div>
+
     <!-- Tapping the viewfinder captures, as it does in every phone camera app. The
          shutter circle below stays as the explicit control. -->
     <div class="cam-wrap" id="camWrap" onclick="captureTest()" role="button" tabindex="0"
@@ -208,7 +177,7 @@
          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();captureTest();}">
       <video id="cam" playsinline autoplay muted></video>
       <div class="roi" id="roi"></div>
-      <div class="roi-label" id="roiLabel">Align the vial · white background</div>
+      <div class="roi-label" id="roiLabel">Hold the vial against white paper</div>
       <div class="flash" id="camFlash" aria-hidden="true"></div>
     </div>
     <button class="shutter" id="shutter" onclick="captureTest()" aria-label="Capture test photo"></button>
@@ -229,7 +198,7 @@
       <button onclick="startCam()">↻ Restart camera</button>
       <label>📁 Photo<input id="photoInput" type="file" accept="image/*" capture="environment" style="display:none" onchange="loadPhoto(event)"></label>
     </div>
-    <div class="sop" style="margin-top:14px"><b>No camera?</b> Read the comparator card and enter mg/L:
+    <div class="sop" style="margin-top:14px"><b>No camera?</b> Read the colour card and type the value:
       <div class="btn2" style="margin-top:8px">
         <input id="manualCl" type="number" step="0.1" min="0" placeholder="e.g. 0.5" style="flex:2">
         <button onclick="manualResult()" style="background:var(--teal);color:#fff;border:none;flex:1">Use</button>
@@ -242,9 +211,6 @@
     <div>
       <div class="bigresult" id="clResult">— <small style="font-size:18px;font-weight:400">mg/L</small></div>
       <div style="text-align:center"><span class="band" id="clBand" style="display:none"></span></div>
-      <div class="gauge" id="gauge" aria-hidden="true"><div class="pin" id="gaugePin" style="left:0;display:none"></div></div>
-      <div class="gauge-lbl" id="gaugeLbl" aria-hidden="true"></div>
-      <ol class="steps" id="clSteps"></ol>
       <div class="note" id="clNote">Capture a test to see the result.</div>
       <div class="caution" id="otoCaution" style="display:none"></div>
     </div>
@@ -254,42 +220,27 @@
        down about a reading you have already taken. Editing any of them re-runs the
        calculation AND re-stamps the photo, so the record cannot disagree with itself. -->
   <div class="card">
-    <h2>3 · Record this test</h2>
-    <label for="siteName">Sample point / location</label>
+    <h2>2 · Save the record</h2>
+    <label for="siteName">Where was this sample taken?</label>
     <input id="siteName" type="text" placeholder="e.g. Ward 7 standpost — consumer tap"
            autocomplete="off" oninput="rerender()">
-    <div class="row2">
-      <div>
-        <label for="temp">Water temperature (°C)</label>
-        <input id="temp" type="number" step="0.1" min="0" max="60" placeholder="e.g. 28.0" oninput="checkPH()">
-      </div>
-      <div>
-        <label for="ph">pH</label>
-        <input id="ph" type="number" step="0.01" min="0" max="14" placeholder="e.g. 7.4" oninput="checkPH()">
-        <div id="phBadge" style="font-size:12px;margin-top:4px"></div>
-      </div>
-    </div>
-    <div class="row2">
-      <div>
-        <label for="dilution">Dilution</label>
-        <select id="dilution" onchange="rerender()">
-          <option value="1">Undiluted (normal)</option>
-          <option value="2">Diluted 1:1 with chlorine-free water (×2)</option>
-          <option value="5">Diluted 1:4 with chlorine-free water (×5)</option>
-        </select>
-      </div>
-      <div id="cyaWrap" style="display:none">
-        <label for="cya">Cyanuric acid / stabilizer <span style="font-weight:400">(mg/L — optional)</span></label>
-        <input id="cya" type="number" min="0" step="1" placeholder="e.g. 40" oninput="rerender()">
+    <div class="note">Date, time, location coordinates and the reading are recorded by the app.</div>
+    <!-- Shown only when a sample reads off the top of the scale, because that is the one
+         case where the app cannot know what the operator did to the sample. -->
+    <div class="sop" id="dilWrap" style="display:none;background:#fff5e0;border:1px solid #f0cf8a;margin-top:12px">
+      <b>Did you dilute this sample?</b>
+      <div class="btn2" style="margin-top:8px">
+        <button id="dilNo" class="on" onclick="setDilution(1)">No</button>
+        <button id="dilYes" onclick="setDilution(2)">Yes — half sample, half clean water</button>
       </div>
     </div>
     <div id="readingSummary" style="font-size:13px;margin-top:12px;display:none;background:var(--lgrey);border-radius:9px;padding:10px 12px"></div>
-    <button id="saveBtn" class="rowbtn" style="margin-top:12px;display:none" onclick="saveReading()">＋ Save this test to the log</button>
-    <div class="note" id="saveHint">Capture a test above, then save it here.</div>
+    <button id="saveBtn" class="rowbtn" style="margin-top:12px;display:none" onclick="saveReading()">＋ Save this test</button>
+    <div class="note" id="saveHint">Take a test above, then save it here.</div>
   </div>
 
   <div class="card" id="recordBlock" style="display:none">
-    <h2>4 · Test record</h2>
+    <h2>3 · Test record</h2>
     <div class="note">The photo is stamped with the sample point, reagent, result, coordinates (if allowed) and timestamp at capture. Address &amp; map load when online.</div>
     <canvas id="stampCanvas" class="stamped"></canvas>
     <div class="btn2">

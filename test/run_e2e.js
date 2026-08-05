@@ -81,7 +81,8 @@ async function newPage(browser, base) {
 
 async function runSample(browser, base, m) {
   const page = await newPage(browser, base);
-  await page.evaluate((r, u) => { setReagent(r); setUse(u); }, m.reagent, m.use);
+  // Deliberately NOT setting the reagent: the app must work it out from the photo.
+  await page.evaluate(u => setUse(u), m.use);
 
   const input = await page.$('#photoInput');
   await input.uploadFile(path.join(SAMPLES, m.file));
@@ -100,6 +101,7 @@ async function runSample(browser, base, m) {
     result: document.getElementById('clResult').innerText,
     conc: window.lastReading ? window.lastReading.conc : null,
     species: window.lastReading ? window.lastReading.species : null,
+    reagent: window.lastReading ? window.lastReading.reagent : null,
     overRange: window.lastReading ? window.lastReading.overRange : null,
     caution: document.getElementById('otoCaution').style.display !== 'none',
     cautionText: document.getElementById('otoCaution').textContent,
@@ -117,11 +119,17 @@ async function runSample(browser, base, m) {
       // The invariant: OTO must never render as a pass.
       check(`${m.file}: never rendered as a pass`, !/\bok\b/.test(state.bandClass),
         `band class was "${state.bandClass}" (${state.band})`);
-      check(`${m.file}: free-chlorine caveat is shown`, state.caution && /upper bound/i.test(state.cautionText),
-        `caution shown=${state.caution}`);
+      // Checks the MEANING, not the old jargon: it must say this is not free chlorine,
+      // and that the figure is the maximum the free chlorine could be.
+      check(`${m.file}: free-chlorine caveat is shown`, state.caution &&
+        /not a free-chlorine result/i.test(state.cautionText) && /\bmost\b/i.test(state.cautionText),
+        `caution shown=${state.caution}; "${state.cautionText.slice(0, 120)}"`);
     } else {
       check(`${m.file}: reported as FREE chlorine`, state.species === 'free', `species=${state.species}`);
     }
+    // The operator never picks a reagent, so every fixture doubles as an auto-detect test.
+    check(`${m.file}: reagent auto-detected as ${m.reagent.toUpperCase()}`,
+      state.reagent === m.reagent.toUpperCase(), `detected ${state.reagent}`);
     check(`${m.file}: offers save + record`, state.saveShown && state.recordShown,
       `save=${state.saveShown} record=${state.recordShown}`);
   } else if (m.expect === 'overrange') {
@@ -136,7 +144,8 @@ async function runSample(browser, base, m) {
     check(`${m.file}: shown with a > prefix`, /^>/.test(state.result.trim()),
       `result="${state.result.split('\n')[0]}"`);
     check(`${m.file}: never rendered as a pass`, !/\bok\b/.test(state.bandClass), state.bandClass);
-    check(`${m.file}: tells the user to dilute`, /dilut/i.test(state.note), state.note.slice(0, 140));
+    check(`${m.file}: tells the user to dilute`,
+      /dilut|half sample with half clean water/i.test(state.note), state.note.slice(0, 140));
   } else {
     const ok = !state.saveShown && state.conc === null &&
       new RegExp(m.reject_contains.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(state.note);
@@ -158,8 +167,6 @@ async function testPDF(browser, base) {
     await page.evaluate(r => { setReagent(r); setUse('drinking'); }, reagent);
     await page.evaluate(() => {
       document.getElementById('siteName').value = 'Ward 7 standpost — consumer tap';
-      document.getElementById('temp').value = '28.4';
-      document.getElementById('ph').value = '7.35';
     });
     const input = await page.$('#photoInput');
     await input.uploadFile(path.join(SAMPLES, file));
@@ -327,9 +334,7 @@ async function testOffline(browser, base) {
   if (!shell.app) { await page.close(); return; }
 
   await page.evaluate(CAPTURE_DOWNLOADS);
-  await page.evaluate(() => { setReagent('dpd'); setUse('drinking');
-    document.getElementById('siteName').value = 'Offline field check';
-    document.getElementById('ph').value = '7.4'; });
+  await page.evaluate(() => { document.getElementById('siteName').value = 'Offline field check'; });
   const input = await page.$('#photoInput');
   await input.uploadFile(path.join(SAMPLES, 'dpd_0p5.png'));
   await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
@@ -459,7 +464,7 @@ async function testLateDetailsRestamp(browser, base) {
     `stamp unchanged at ${after.stamp} chars — image would disagree with the record`);
 
   // Dilution is the one detail that changes the NUMBER, so it must recompute, not rescale.
-  await page.evaluate(() => { document.getElementById('dilution').value = '2'; rerender(); });
+  await page.evaluate(() => setDilution(2));
   const dil = await page.evaluate(() => window.lastReading.conc);
   check('dilution set after capture recomputes the reading',
     Math.abs(dil - before.conc * 2) < 0.01, `${before.conc} -> ${dil}, expected ~${(before.conc * 2).toFixed(3)}`);
@@ -479,18 +484,25 @@ async function testLayout(browser, base) {
   const st = await page.evaluate(() => {
     const chips = [...document.querySelectorAll('#stepChips span')];
     const card = el => { for (let n = el; n; n = n.parentElement) if (n.classList && n.classList.contains('card')) return n; };
-    const sameCardAsSave = id => card(document.getElementById(id)) === card(document.getElementById('saveBtn'));
     return {
-      n: chips.length,
       highlighted: chips.filter(c => c.className.includes('on')).map(c => c.textContent),
       styles: [...new Set(chips.map(c => getComputedStyle(c).backgroundColor + '/' + getComputedStyle(c).color))],
-      detailsWithSave: ['siteName', 'temp', 'ph', 'dilution'].filter(sameCardAsSave),
+      // Every field the operator can type into, anywhere on the page.
+      inputs: [...document.querySelectorAll('input, select, textarea')]
+        .filter(e => e.type !== 'file' && e.offsetParent).map(e => e.id),
+      locationWithSave: card(document.getElementById('siteName')) === card(document.getElementById('saveBtn')),
+      technical: /absorbance|log₁₀|channel|transmittance|R²|calibrat/i.test(document.body.innerText),
     };
   });
   check('no step chip is highlighted', st.highlighted.length === 0, `highlighted: ${st.highlighted}`);
   check('all step chips render identically', st.styles.length === 1, `distinct styles: ${st.styles}`);
-  check('sample details sit in the same card as Save',
-    st.detailsWithSave.length === 4, `only ${st.detailsWithSave} moved`);
+  // The product constraint: location is the only thing an operator types. manualCl is the
+  // no-camera fallback, which is a reading not a setting.
+  check('location is the only field the operator fills in',
+    st.inputs.filter(i => i !== 'manualCl').length === 1 && st.inputs.includes('siteName'),
+    `visible inputs: ${st.inputs}`);
+  check('location sits with Save', st.locationWithSave, 'siteName is not in the Save card');
+  check('no technical exposition on screen', !st.technical, 'found absorbance/channel/calibration wording');
   await page.close();
 }
 
@@ -581,10 +593,8 @@ async function testCaptureStrip(browser, base) {
   input = await page.$('#photoInput');
   await input.uploadFile(path.join(SAMPLES, 'dpd_0p5.png'));
   await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
-  await page.evaluate(() => setReagent('oto'));
-  check('switching reagent clears the strip', (await read(page)).hidden, 'strip survived a reagent switch');
   // A typed comparator reading is not a photograph.
-  await page.evaluate(() => { setReagent('dpd'); document.getElementById('manualCl').value = '0.5'; manualResult(); });
+  await page.evaluate(() => { document.getElementById('manualCl').value = '0.5'; manualResult(); });
   check('manual entry does not claim a photo was read', (await read(page)).hidden, 'strip shown for manual entry');
   await page.close();
 }
@@ -655,7 +665,8 @@ async function testFieldCaptures(browser, base) {
 
   for (const m of manifest) {
     const page = await newPage(browser, base);
-    await page.evaluate((r, u) => { setReagent(r); setUse(u); }, m.reagent, m.use);
+    // No reagent selection — a real operator no longer makes one.
+    await page.evaluate(u => setUse(u), m.use);
     const input = await page.$('#photoInput');
     await input.uploadFile(path.join(dir, m.file));
     await page.waitForFunction(
@@ -666,6 +677,7 @@ async function testFieldCaptures(browser, base) {
       conc: window.lastReading ? window.lastReading.conc : null,
       over: window.lastReading ? window.lastReading.overRange : null,
       T: window.lastReading ? window.lastReading.transmittance : null,
+      reagent: window.lastReading ? window.lastReading.reagent : null,
       lo: window.lastReading ? window.lastReading.concLo : null,
       hi: window.lastReading ? window.lastReading.concHi : null,
       note: document.getElementById('clNote').textContent,
@@ -676,6 +688,8 @@ async function testFieldCaptures(browser, base) {
     if (st.conc === null) { await page.close(); continue; }
 
     // The regression that matters: this frame must never go back to a bare lower bound.
+    check(`${m.file}: reagent auto-detected as ${m.reagent.toUpperCase()} from a real photo`,
+      st.reagent === m.reagent.toUpperCase(), `detected ${st.reagent}`);
     check(`${m.file}: not reported as over range`, st.over === false,
       `over range again — the operator gets ">${st.conc}" instead of a value`);
     check(`${m.file}: reads well above the old ${m.old_ceiling} ceiling`,
@@ -740,32 +754,21 @@ async function testPhedProtocol(browser, base) {
 
   // "Color development must be evaluated immediately after reagent mixing."
   const sop = await page.evaluate(() => document.getElementById('sopBox').textContent);
-  check('SOP tells the operator to read immediately', /immediately/i.test(sop) &&
-    !/wait until|4:30|5 minutes|5:00/i.test(sop), sop.slice(0, 200));
+  // "straight away" rather than "immediately" — same instruction, simpler for a reader
+  // whose first language is not English.
+  check('SOP tells the operator to photograph without delay',
+    /straight away|immediately|right away/i.test(sop) && !/wait until|wait for|4:30|5 minutes|5:00/i.test(sop),
+    sop.slice(0, 200));
 
-  // An immediate read must never be refused.
-  const early = await page.evaluate(() => {
-    toggleTimer();                       // reagent added right now
-    return { gate: timingGate(), note: document.getElementById('timerNote').textContent };
-  });
-  check('an immediate read is not refused', early.gate === null,
-    `refused: ${early.gate && early.gate.shortMsg}`);
-  check('timer guidance points at photographing now', /photograph now/i.test(early.note), early.note);
-
-  // "...to prevent overestimation of residual levels due to delayed reactions."
-  // A late read is the direction the protocol warns about, so it must be flagged.
-  const late = await page.evaluate(() => {
-    window.otoTimerStart = Date.now() - 200 * 1000; paintTimer();
-    const warn = document.getElementById('timerNote').textContent;
-    window.otoTimerStart = Date.now() - 900 * 1000;
-    return { warn, gate: timingGate() };
-  });
-  check('a delayed read is warned about as an over-estimate',
-    /rising|high|over-?estimate/i.test(late.warn), late.warn);
-  check('a very late read is refused, naming over-reporting',
-    late.gate !== null && /over-?report/i.test(late.gate.longMsg),
-    late.gate ? late.gate.longMsg.slice(0, 100) : 'not refused');
-  await page.evaluate(() => stopTimer());
+  // Nothing in the app may make the operator wait before photographing.
+  const forced = await page.evaluate(() => ({
+    timer: typeof window.toggleTimer === 'function',
+    // "Waiting makes the reading too high" is a warning, not an instruction to wait —
+    // match only wording that would hold the operator back.
+    wait: /wait until|wait for|4:30|5 minutes|5:00/i.test(document.body.innerText),
+  }));
+  check('no timer forces a wait before the photo', !forced.timer && !forced.wait,
+    `timer=${forced.timer} waitWording=${forced.wait}`);
 
   // The card's own bands, so the app and the card in the operator's hand agree.
   const bands = await page.evaluate(() => ({
@@ -799,12 +802,10 @@ async function testGuards(browser, base) {
   await page.evaluate(() => { setReagent('dpd'); setUse('drinking'); });
   await input.uploadFile(path.join(SAMPLES, 'dpd_0p5.png'));
   await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
-  await page.evaluate(() => setReagent('oto'));
-  const after = await page.evaluate(() => ({
-    reading: window.lastReading, save: document.getElementById('saveBtn').style.display,
-    note: document.getElementById('clNote').textContent }));
-  check('switching reagent clears the stale reading', after.reading === null && after.save === 'none',
-    `reading=${JSON.stringify(after.reading)} save=${after.save}`);
+  // The reagent is no longer chosen by the operator — it is read off the vial colour — so
+  // there is no "wrong reagent selected" state left to get stale.
+  const auto = await page.evaluate(() => window.lastReading.reagent);
+  check('reagent is detected from the photo, not selected', auto === 'DPD', `detected ${auto}`);
 
   // Manual zero entry is the ONLY route to a reported zero (a colourless vial is
   // refused), and it must raise the critical interstitial.

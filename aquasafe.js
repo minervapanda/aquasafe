@@ -138,6 +138,12 @@ function esc(s) {
 }
 function _median(a) { if (!a.length) return 0; a.sort(function (x, y) { return x - y; }); return a[a.length >> 1]; }
 function $(id) { return document.getElementById(id); }
+// The UI carries almost no inputs now, so every read has to survive the element being
+// absent rather than throwing on a missing field.
+function val(id) { var e = $(id); return e ? e.value : ''; }
+function setText(id, t) { var e = $(id); if (e) e.textContent = t; }
+function setHTML(id, h) { var e = $(id); if (e) e.innerHTML = h; }
+function show(id, on, disp) { var e = $(id); if (e) e.style.display = on ? (disp || 'block') : 'none'; }
 
 // ---------------------------------------------------------------------------
 // Reagent profiles
@@ -228,8 +234,41 @@ function U() { return USES[useId]; }
 function analyzeFrame(srcEl, w, h) {
   var cv = document.createElement('canvas'); cv.width = w; cv.height = h;
   var cx = cv.getContext('2d'); cx.drawImage(srcEl, 0, 0, w, h);
-  return analyzePixels(cx.getImageData(Math.round(w * 0.30), 0, Math.round(w * 0.40), h).data);
+  return analyzeAuto(cx.getImageData(Math.round(w * 0.30), 0, Math.round(w * 0.40), h).data);
 }
+// Which reagent is in the vial is something the app can SEE, so it is no longer asked.
+// This also removes a whole class of field error: an operator can no longer push a yellow
+// OTO sample through the DPD maths by leaving the wrong reagent selected.
+//
+// The discriminator is WHICH CHANNEL IS DARKEST, not a hue threshold. DPD-pink is
+// magenta-ward, so GREEN is its minimum; OTO-yellow absorbs blue, so BLUE is its minimum.
+// That test survives a colour cast in a way a threshold does not: warming a photo lowers
+// blue, but a pink vial's blue still sits above its green, and cooling raises blue but a
+// yellow vial's blue still sits below its green. Neutral and very dark pixels abstain.
+//
+// Deciding first, then running ONE analysis pass, matters. An earlier version ran both
+// reagents' passes and took whichever detected something — but the white reference is
+// chosen by brightness in the measuring channel, so the DPD pass on a yellow sample picks
+// its reference off the vial itself and can then hallucinate pink out of the edges.
+function pickReagent(d) {
+  var pink = 0, yellow = 0, i, Rr, Gg, Bb, mx, mn;
+  for (i = 0; i < d.length; i += 4) {
+    Rr = d[i]; Gg = d[i + 1]; Bb = d[i + 2];
+    mx = Math.max(Rr, Gg, Bb); mn = Math.min(Rr, Gg, Bb);
+    if (mx - mn < 20 || mx < 60) continue;      // too neutral, or too dark, to call
+    if (Gg === mn) pink++; else if (Bb === mn) yellow++;
+  }
+  if (pink < 50 && yellow < 50) return null;    // nothing coloured enough to be a vial
+  return pink >= yellow ? 'dpd' : 'oto';
+}
+function analyzeAuto(d) {
+  var pick = pickReagent(d);
+  if (pick) reagentId = pick;
+  var out = analyzePixels(d);
+  out.reagentId = reagentId;
+  return out;
+}
+
 // Split out so the test harness can drive the maths without a DOM canvas.
 function analyzePixels(d) {
   var rg = R(), other = REAGENTS[rg.id === 'dpd' ? 'oto' : 'dpd'];
@@ -344,7 +383,19 @@ function offChannelCheck(rg, sV, wV) {
            suspect: aBlue > 0.02 && aRed > 0.20 * aBlue && aRed > 0.04 };
 }
 
-function dilutionFactor() { return parseFloat($('dilution').value) || 1; }
+// Dilution is the one thing the app genuinely cannot observe — it is an act the operator
+// performed on the sample before the photo. It is therefore NOT a standing form field:
+// the question appears only when a reading comes back off the top of the scale, which is
+// the only situation where the answer changes anything.
+var dilutionState = 1;
+function dilutionFactor() { return dilutionState; }
+function setDilution(f) {
+  dilutionState = f;
+  var no = $('dilNo'), yes = $('dilYes');
+  if (no) no.className = (f === 1 ? 'on' : '');
+  if (yes) yes.className = (f !== 1 ? 'on' : '');
+  rerender();
+}
 
 // mg/L from the two channel medians. Shared by both reagents; only k and the channel
 // differ. Returns an over-range flag rather than a silently huge number.
@@ -411,9 +462,15 @@ function concInterval(T, rg, dil) {
 // free-residual floor is met. The only sound inference from OTO is downward: total
 // zero implies free zero. So OTO returns 'zero' (critical), 'high' (a caution, which
 // is safe to raise) or 'info' (indeterminate) — never 'ok'.
-function classify(conc, rg, u, overRange) {
+function classify(conc, rg, u, overRange, manual) {
   rg = rg || R(); u = u || U();
   if (conc <= 0.049 && !overRange) return { band: 'zero', label: 'ZERO — unsafe', critical: true };
+
+  // A number typed off a colour card has UNKNOWN provenance: with no reagent control, the
+  // app cannot tell whether the operator read a DPD (free) card or an OTO (total) one, and
+  // those are different quantities. It may therefore never render a typed value as a pass.
+  // Zero is still sound, because zero on either card means zero chlorine.
+  if (manual) return { band: 'info', label: 'Typed from your colour card — not checked by the app' };
 
   if (rg.species === 'total') {
     if (overRange) return { band: 'high', label: 'Over range — dilute and re-test' };
@@ -423,7 +480,7 @@ function classify(conc, rg, u, overRange) {
     return { band: 'info', label: 'Total chlorine — free residual not established' };
   }
 
-  var cya = parseFloat($('cya') ? $('cya').value : '') || 0;
+  var cya = parseFloat('') || 0;
   var lo = u.min;
   if (u.id === 'pool' && cya > 0) lo = 2.0;      // MAHC 2023 stabilized minimum
   if (conc < lo) return { band: 'low', label: 'Low (<' + lo + ') — under-chlorinated' };
@@ -435,123 +492,55 @@ function classify(conc, rg, u, overRange) {
 // ---------------------------------------------------------------------------
 // UI wiring
 // ---------------------------------------------------------------------------
+// Kept as functions because the engine and the test suite drive them, but they are no
+// longer controls: the reagent is read off the vial colour, and the application defaults
+// to drinking water (pool operators have PoolCheck).
 function setReagent(id) {
   if (!REAGENTS[id]) return;
   reagentId = id;
-  $('rgDpd').className = id === 'dpd' ? 'on' : '';
-  $('rgOto').className = id === 'oto' ? 'on' : '';
-  $('segReagent').className = 'seg ' + R().segClass;
-  // Switching reagent invalidates any reading on screen — the maths, the channel and
-  // the measured species all changed.
-  clearResult('Reagent switched to ' + R().name + '. Capture a new test.');
   syncReagentUI();
 }
 function setUse(id) {
   if (!USES[id]) return;
   useId = id;
-  $('useDrink').className = id === 'drinking' ? 'on' : '';
-  $('usePool').className = id === 'pool' ? 'on' : '';
-  $('cyaWrap').style.display = (id === 'pool') ? 'block' : 'none';
   syncReagentUI();
   rerender();
 }
+// One set of instructions, because the operator no longer picks a reagent — the app
+// reads which one is in the vial off the photograph.
+var SOP = [
+  'Fill the vial to <b>10 mL</b> with the water you are testing.',
+  'Add your chlorine reagent — <b>DPD</b> (turns pink) or <b>OTO</b> (turns yellow) — and mix.',
+  'Photograph it <b>straight away</b> — within 1 minute. Waiting changes the colour and the reading goes wrong.',
+  'Hold the vial against <b>plain white paper</b>, fill the outline, and tap the picture.'
+];
+var CHIPS = ['1 · Fill 10 mL', '2 · Add reagent', '3 · Photograph', '4 · Result'];
 function syncReagentUI() {
   var rg = R(), u = U();
-  $('sopBox').innerHTML = '<b>How to test — ' + rg.name + '</b><ol>' +
-    rg.sop.map(function (s) { return '<li>' + s + '</li>'; }).join('') + '</ol>';
+  $('sopBox').innerHTML = '<b>How to test</b><ol>' +
+    SOP.map(function (x) { return '<li>' + x + '</li>'; }).join('') + '</ol>';
   // Uniform, never highlighted. The chips are a printed procedure, not a progress
   // indicator — nothing advances them, so marking step 1 "current" told every user they
   // were at the start no matter where they actually were.
-  $('stepChips').innerHTML = rg.chips.map(function (c) {
+  $('stepChips').innerHTML = CHIPS.map(function (c) {
     return '<span>' + esc(c) + '</span>';
   }).join('');
   $('resultHeading').textContent = rg.speciesLabel;
-  $('reagentNote').innerHTML = rg.id === 'dpd'
-    ? 'DPD No.1 measures <b>free chlorine</b> — the fraction that actually disinfects, and the one the standards are written against.'
-    : 'OTO measures <b>total chlorine</b> (free + combined). It cannot separate the two, so it can flag a zero or an excess but <b>cannot confirm</b> that a free-residual standard is met.';
-  $('timerBox').style.display = (rg.species === 'total') ? 'block' : 'none';
-  if (rg.species !== 'total') stopTimer();
-  $('gauge').style.background = u.gaugeCSS;
-  $('gaugeLbl').innerHTML = u.gaugeStops.map(function (s) { return '<span>' + esc(s) + '</span>'; }).join('');
-  $('roiLabel').textContent = 'Align the ' + rg.colourWord + ' vial · white background';
-  $('footNote').innerHTML = rg.id === 'dpd'
-    ? 'DPD green-channel colorimetry · free chlorine = ' + DPD_K + ' × log₁₀(G<sub>white</sub>/G<sub>sample</sub>), R²=0.995, fitted 0.1–1.0 mg/L.<br>' + esc(u.standard) + '<br>A screening aid — confirm against the comparator card.'
-    : 'OTO blue-channel colorimetry · total chlorine = ' + OTO_K + ' × log₁₀(B<sub>white</sub>/B<sub>sample</sub>). ' + esc(OTO_CAL_NOTE) + '<br>' + esc(u.standard) + '<br>A screening aid — confirm against the comparator card.';
+  $('footNote').innerHTML = 'A screening aid, not a laboratory test. Always confirm an ' +
+    'important result against your colour card.<br>' + esc(u.standard);
 }
 
-// ---------------------------------------------------------------------------
-// OTO reaction timer
-// ---------------------------------------------------------------------------
-// Acid OTO read at under ~15 s approximates FREE chlorine; read at 5 minutes it is
-// TOTAL. Since this mode reports total, the time the photo was taken is part of the
-// measurement, not a nicety. The timer is optional — a field user with a photo already
-// on the phone can still get a reading — but an untimed reading is labelled as such
-// everywhere it appears, and a timed one outside the window is refused.
-// PHED's own standard reference is explicit: "Color development must be evaluated
-// IMMEDIATELY after reagent mixing to prevent OVERESTIMATION of residual levels due to
-// delayed reactions."
-//
-// An earlier version of this app enforced the classical Standard Methods convention
-// instead — free chlorine at <15 s, total at 5 min — and REFUSED any photo before 4:30.
-// That told a PHED operator to do the opposite of their own protocol, and per that
-// protocol to over-report. The document wins: it is the procedure these users are
-// trained on and audited against.
-//
-// So the timer never blocks an early read. It only flags a LATE one, which is the
-// direction the protocol warns about. (The tension is real and is recorded in
-// test/oto_calibration.json: reading immediately under-develops chloramines, so the
-// value sits nearer free chlorine than total. That keeps "an upper bound on free
-// chlorine" true, which is the claim the safety logic rests on.)
-var OTO_LATE_WARN_S = 120, OTO_LATE_HARD_S = 600;
-var otoTimerStart = null, otoTimerTick = null;
-function toggleTimer() {
-  if (otoTimerStart) { stopTimer(); return; }
-  otoTimerStart = Date.now();
-  $('timerBtn').textContent = '■ Reset';
-  otoTimerTick = setInterval(paintTimer, 250);
-  paintTimer();
-}
-function stopTimer() {
-  otoTimerStart = null;
-  if (otoTimerTick) { clearInterval(otoTimerTick); otoTimerTick = null; }
-  $('timerBtn').textContent = '▶ Reagent added';
-  $('timerFace').textContent = '—:—';
-  $('timerFace').style.color = 'var(--grey)';
-  $('timerNote').textContent = 'Optional, but a reading with no recorded reaction time is marked as such on the report.';
-}
-function elapsedS() { return otoTimerStart ? (Date.now() - otoTimerStart) / 1000 : null; }
-function paintTimer() {
-  var e = elapsedS(); if (e === null) return;
-  var face = $('timerFace');
-  face.textContent = Math.floor(e / 60) + ':' + ('0' + Math.floor(e % 60)).slice(-2);
-  if (e <= OTO_LATE_WARN_S) {
-    face.style.color = 'var(--green)';
-    $('timerNote').textContent = 'Photograph now. PHED protocol: read immediately after mixing.';
-  } else if (e <= OTO_LATE_HARD_S) {
-    face.style.color = 'var(--amber)';
-    $('timerNote').textContent = 'Over 2 minutes since mixing — the colour keeps rising, so the reading will run high. Photograph now and treat it as an over-estimate.';
-  } else {
-    face.style.color = 'var(--red)';
-    $('timerNote').textContent = 'Over 10 minutes — the colour has drifted too far to read. Make a fresh test.';
-  }
-  if (typeof checkROI === 'function' && camStream) checkROI();
-}
-// Returns a rejection reason if the timer is running and we are outside the window.
-function timingGate() {
-  var rg = R(); if (rg.species !== 'total') return null;
-  var e = elapsedS(); if (e === null) return null;
-  // Never refuse an EARLY read — PHED asks for exactly that. Only a very late one is
-  // refused, and that is the direction the protocol warns about.
-  if (e > OTO_LATE_HARD_S) return { shortMsg: 'Over 10 minutes since mixing',
-    longMsg: '<b>Too late to read.</b> ' + Math.floor(e / 60) + ' minutes have elapsed since the reagent went in. The OTO colour keeps rising for hours, so a reading this late over-reports — which is the error the PHED protocol warns about. Make a fresh test and photograph it straight away.' };
-  return null;
-}
-
+// Re-read on every capture, not once at start-up. A day's round is many sample points;
+// fixing the coordinates at app launch would stamp every record in that round with the
+// location of the first one, which is worse than no location at all on a field document.
 function requestGeo() {
   if (!navigator.geolocation) return;
   navigator.geolocation.getCurrentPosition(
-    function (p) { lastGeo = { lat: p.coords.latitude, lon: p.coords.longitude }; },
-    function () { lastGeo = null; }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+    function (p) {
+      lastGeo = { lat: p.coords.latitude, lon: p.coords.longitude,
+                  acc: p.coords.accuracy, at: Date.now() };
+    },
+    function () { lastGeo = null; }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
 }
 function startCam() {
   stopCam();
@@ -593,8 +582,6 @@ function checkROI() {
 // photo can never bypass a check the live path applies.
 function gateReasons(s) {
   var rg = R();
-  var t = timingGate();
-  if (t) return { ok: false, shortMsg: t.shortMsg, longMsg: t.longMsg };
   if (s.overFrac > 0.15) return { ok: false, shortMsg: 'Too bright / glare — move to shade',
     longMsg: '<b>Too much glare.</b> Retake away from direct sun and reflections.' };
   // Reference problems are diagnosed BEFORE "no vial": without a usable white card the
@@ -605,10 +592,10 @@ function gateReasons(s) {
   if (s.ref < 150) return { ok: false, shortMsg: 'Use a white background behind the vial',
     longMsg: '<b>No white reference.</b> Place the vial against plain white paper in even light and retake — a reading without a measured white reference is unreliable.' };
   if (!s.detected) {
-    if (s.wrongReagent) return { ok: false, shortMsg: 'That vial looks ' + s.otherColour + ' — ' + s.otherName + ' is selected?',
-      longMsg: '<b>Reagent mismatch.</b> ' + rg.name + ' is selected but the vial is <b>' + s.otherColour + '</b>, which is the ' + s.otherName + ' colour. Switch the reagent above, or re-run the test with ' + rg.name + '.' };
-    return { ok: false, shortMsg: 'Align the ' + rg.colourWord + ' vial in the outline',
-      longMsg: '<b>No ' + rg.colourWord + ' vial detected.</b> Align the ' + rg.name + ' vial against a white background and capture again. If the sample is truly colourless, confirm zero on the comparator card — this app will not report a zero it cannot see.' };
+    // There is no reagent to have got wrong any more, so there is one message: the app
+    // could not find a coloured vial at all.
+    return { ok: false, shortMsg: 'Move the vial inside the outline',
+      longMsg: '<b>No test vial found.</b> Hold the vial inside the outline with plain white paper behind it, and take the photo again. If the water has no colour at all, read your colour card instead — this app will not report a zero it cannot see.' };
   }
   if (s.offChannel && s.offChannel.suspect) return { ok: false,
     shortMsg: 'Colour is not a clean yellow — check the reagent',
@@ -665,6 +652,7 @@ function captureTest() {
     return;
   }
   shotFeedback();
+  requestGeo();                      // fresh fix for THIS sample point
   var w = v.videoWidth, h = v.videoHeight;
   // Deliberately NOT gated on the shutter's disabled state: if the frame is unusable the
   // user gets the specific reason from finishTest, which beats a tap that does nothing.
@@ -763,6 +751,7 @@ function capResult(r, rg, u, c) {
 }
 function loadPhoto(ev) {
   var f = ev.target.files[0]; if (!f) return;
+  requestGeo();
   var img = new Image();
   img.onload = function () { finishTest(analyzeFrame(img, img.width, img.height), img, img.width, img.height); };
   img.onerror = function () { clearResult('That file could not be read as an image. Try another photo.'); };
@@ -775,11 +764,11 @@ function clearResult(noteHtml) {
   lastReading = null; lastResult = null; lastCapture = null;
   capHide();
   $('clResult').innerHTML = '— <small style="font-size:18px;font-weight:400">mg/L</small>';
-  $('clBand').style.display = 'none'; $('gaugePin').style.display = 'none';
-  $('clSteps').innerHTML = ''; $('recordBlock').style.display = 'none';
+  $('clBand').style.display = 'none';
+  $('recordBlock').style.display = 'none';
   $('readingSummary').style.display = 'none'; $('saveBtn').style.display = 'none';
   $('otoCaution').style.display = 'none'; $('pdfNote').textContent = '';
-  $('saveHint').style.display = 'block';
+  show('saveHint', true); show('dilWrap', false);
   $('clNote').innerHTML = noteHtml;
 }
 function finishTest(s, srcEl, w, h) {
@@ -811,7 +800,7 @@ function finishTest(s, srcEl, w, h) {
   if (!criticalShown) capResult(lastReading, R(), U(), classify(r.conc, R(), U(), r.overRange));
 }
 function manualResult() {
-  var v = parseFloat($('manualCl').value);
+  var v = parseFloat(val('manualCl'));
   if (!(v >= 0)) { $('clNote').textContent = 'Enter the card reading in mg/L.'; return; }
   criticalShown = false;
   renderResult({ conc: v, manual: true, adviseDil: false, overRange: false, extrapolated: false }, null);
@@ -831,7 +820,7 @@ function rerender() {
 
 function renderResult(r, px) {
   lastResult = { r: r, px: px };
-  var rg = R(), u = U(), c = classify(r.conc, rg, u, r.overRange);
+  var rg = R(), u = U(), c = classify(r.conc, rg, u, r.overRange, r.manual);
 
   // The OTO constant carries +/-40% in BOTH directions, and that interval straddles the
   // 0.2 mg/L adequacy threshold. Publishing a bare "0.21 mg/L" would imply a precision
@@ -847,28 +836,9 @@ function renderResult(r, px) {
     '<div style="font-size:13px;font-weight:600;color:var(--grey);margin-top:2px">' +
     rg.speciesLabel + ' · ' + rg.name + '</div>' + band;
   var b = $('clBand'); b.style.display = 'inline-block'; b.className = 'band ' + c.band; b.textContent = c.label;
-  var pin = $('gaugePin'); pin.style.display = 'block';
-  pin.style.left = Math.max(0, Math.min(100, (r.conc / u.gaugeMax) * 100)) + '%';
 
-  var st = [];
-  if (!r.manual && px) {
-    st.push(rg.channelName.charAt(0).toUpperCase() + rg.channelName.slice(1) +
-      ' read from photo: <span class="u">vial ' + rg.channelName.charAt(0).toUpperCase() + '=' + fmt(px.s, 1) +
-      ' · white ' + rg.channelName.charAt(0).toUpperCase() + '=' + fmt(px.ref, 1) + '</span>');
-    st.push('Absorbance A = log₁₀(white/vial) = <span class="u">' + fmt(r.A, 4) + '</span>');
-    var dil = dilutionFactor();
-    st.push(rg.leak
-      ? 'Leak-corrected: ' + rg.speciesLabel + ' = ' + rg.k + '×(1−' + rg.leak + ') × log₁₀((1−' + rg.leak +
-        ')/(T−' + rg.leak + ')), T=' + fmt(r.T, 3) + (dil > 1 ? ' × ' + dil : '') +
-        ' = <span class="u"><b>' + (r.overRange ? '&gt;' : '') + fmt(r.conc, 2) + ' mg/L</b></span>'
-      : rg.speciesLabel + ' = ' + rg.k + ' × A' + (dil > 1 ? ' × ' + dil + ' (dilution)' : '') +
-        ' = <span class="u"><b>' + (r.overRange ? '&gt;' : '') + fmt(r.conc, 2) + ' mg/L</b></span>');
-  } else if (r.manual) {
-    st.push('Manual comparator-card reading: <b>' + fmt(r.conc, 2) + ' mg/L</b> (' + rg.speciesLabel.toLowerCase() + ')');
-  }
-  $('clSteps').innerHTML = st.map(function (x) { return '<li>' + x + '</li>'; }).join('');
 
-  var cyaRaw = ($('cya') && useId === 'pool') ? $('cya').value : '';
+  var cyaRaw = '';
   var cya = (cyaRaw !== '' && isFinite(parseFloat(cyaRaw))) ? parseFloat(cyaRaw) : null;
 
   var note;
@@ -886,9 +856,8 @@ function renderResult(r, px) {
       high: 'Above ' + u.idealHigh + ' mg/L — reduce dosing; high chlorine causes taste/odour complaints and irritation.',
       vhigh: 'Well above the guideline — do not use until it falls.' }[c.band];
   }
-  if (r.overRange) note += ' The ' + rg.channelName + ' channel is saturated, so this is a LOWER BOUND, not a measurement — dilute and re-test with the dilution set.';
-  else if (r.extrapolated) note += ' Above the calibrated range (' + rg.fitMax + ' mg/L undiluted), so the value is extrapolated — dilute and re-test to confirm.';
-  else if (r.adviseDil) note += ' Dilute 1:1 with chlorine-free water, set the dilution, and re-test for accuracy.';
+  if (r.overRange) note += ' The colour is too dark to measure, so the real value is higher than this. Mix half sample with half clean water and test again.';
+  else if (r.extrapolated) note += ' This is near the top of what the test can measure. Mix half sample with half clean water and test again to check it.';
   if (cya !== null && cya > 90) note += ' CYA ' + cya + ' mg/L exceeds the MAHC maximum (90) — replace ' + Math.round((1 - 90 / cya) * 100) + '% of the water to dilute the stabilizer.';
   $('clNote').textContent = note;
 
@@ -896,27 +865,21 @@ function renderResult(r, px) {
   var cau = $('otoCaution');
   if (rg.species === 'total' && c.band !== 'zero') {
     cau.style.display = 'block';
-    cau.innerHTML = '<b>This is not a free-chlorine result.</b> OTO responds to free chlorine <i>and</i> to chloramines, so ' +
-      fmt(r.conc, 2) + ' mg/L is the <b>upper bound</b> on free chlorine — the true free residual may be anywhere from 0 to ' +
-      fmt(r.conc, 2) + ' mg/L. The ' + esc(u.label.toLowerCase()) + ' standard (' +
-      (u.id === 'pool' ? '1–3' : '≥0.2') + ' mg/L) is written against <b>free</b> chlorine and <b>cannot be shown to be met from this test</b>. ' +
-      'Re-test with DPD No.1 to confirm the free residual.' +
-      (lastReading && lastReading.reactionS === null
-        ? '<br><br><b>Reaction time not recorded.</b> Read at a few seconds this is nearer free chlorine; at five minutes it is total. Without the timer the reading sits somewhere between the two.'
-        : '') +
-      '<br><br>The OTO constant is <b>provisional (±40%)</b> and OTO reads low against reference methods — about 90% of true for inorganic chloramines and as little as 50% in real pool water. ' +
-      'Near the ' + (u.id === 'pool' ? '1 mg/L' : '0.2 mg/L') + ' line this test cannot tell adequate from inadequate residual.' +
-      // The single most dangerous real pool is one where all the chlorine is combined:
-      // it smells strongly of chlorine, has no sanitiser at all, and is exactly the
-      // state OTO is blind to. Name it, in pool mode, rather than leave it implied.
+    cau.innerHTML = '<b>This is not a free-chlorine result.</b> OTO measures <b>all</b> the chlorine ' +
+      'together — the part that kills germs and the part that does not. So ' + fmt(r.conc, 2) + ' mg/L is the ' +
+      '<b>most</b> the free chlorine can be. It may be much less. It may be zero.' +
+      '<br><br>This test <b>cannot show</b> that the water meets the ' +
+      (u.id === 'pool' ? '1–3 mg/L pool rule' : '0.2 mg/L drinking water rule') +
+      ', because that rule is about free chlorine. Use a <b>DPD</b> test to check free chlorine.' +
       (u.id === 'pool'
-        ? '<br><br><b>Pool-specific warning.</b> The classic outbreak pool reads high on total chlorine and <b>zero on free</b> — all of it bound up as chloramine. It smells strongly of chlorine and is not disinfected at all. OTO cannot distinguish that pool from a properly sanitized one. <b>Do not reopen or clear a pool on an OTO reading</b>; use DPD No.1.'
-        : '');
+        ? '<br><br><b>Pools:</b> a pool can show plenty of chlorine here and still have <b>none</b> that works. It smells strongly of chlorine and is not safe. <b>Do not open a pool on this test.</b>'
+        : '') +
+      '<br><br>This reading is close, not exact. Check it against your colour card.';
   } else { cau.style.display = 'none'; }
 
   // Active HOCl only means something for FREE chlorine; computing it from an OTO
   // total would dress up an upper bound as a disinfection figure.
-  var temp = $('temp').value, ph = $('ph').value;
+  var temp = val('temp'), ph = val('ph');
   var tempN = (temp !== '' ? parseFloat(temp) : null), phN = (ph !== '' ? parseFloat(ph) : null);
   var hoclF = null, activeCl = null, hoclHTML = '';
   if (rg.species === 'free' && phN !== null && isFinite(phN)) {
@@ -947,22 +910,22 @@ function renderResult(r, px) {
     temp: tempN, ph: phN, cya: cya,
     hoclFraction: (hoclF !== null ? parseFloat(hoclF.toFixed(3)) : null),
     activeCl: (activeCl !== null ? parseFloat(activeCl.toFixed(2)) : null),
-    reactionS: (rg.species === 'total' && !r.manual) ? (elapsedS() === null ? null : Math.round(elapsedS())) : undefined,
     cardBand: rg.species === 'total' ? otoCardBand(r.conc) : null,
-    site: ($('siteName').value || '').trim(),
+    site: (val('siteName') || '').trim(),
     lat: lastGeo ? lastGeo.lat : null, lon: lastGeo ? lastGeo.lon : null,
     ts: new Date().toISOString()
   };
 
   var sum = $('readingSummary'); sum.style.display = 'block';
-  sum.innerHTML = '<b>Reading</b> — ' + esc(rg.speciesLabel) + ' <b>' + (r.overRange ? '&gt;' : '') + fmt(r.conc, 2) + ' mg/L</b>' +
-    '  ·  ' + esc(rg.name) + '  ·  ' + esc(u.label) +
-    '  ·  Temp ' + (tempN !== null ? fmt(tempN, 1) + ' °C' : '—') +
-    '  ·  pH ' + (phN !== null ? fmt(phN, 2) : '—') +
-    (cya !== null ? '  ·  CYA ' + fmt(cya, 0) + ' mg/L' : '') + hoclHTML;
+  sum.innerHTML = '<b>Reading</b> — ' + esc(rg.speciesLabel) + ' <b>' + (r.overRange ? '&gt;' : '') +
+    fmt(r.conc, 2) + ' mg/L</b>  ·  ' + esc(rg.name) + '  ·  ' + esc(u.label) +
+    (r.cardBand ? '<br>Colour card: <b>' + esc(r.cardBand) + '</b>' : '');
 
   $('saveBtn').style.display = 'block';
-  $('saveHint').style.display = 'none';
+  show('saveHint', false);
+  // The one thing the app cannot observe: whether the operator diluted the sample. Ask
+  // only when it matters — when the colour is at or past the top of the scale.
+  show('dilWrap', !r.manual && (r.overRange || r.extrapolated));
   // Once per CAPTURE, not once per render. rerender() runs on every keystroke in the
   // sample-detail fields, and without this the alert re-opened and stole focus out of
   // the text box on every character typed after a zero reading.
@@ -1045,7 +1008,7 @@ function csvCell(v) {
 function exportHistory() {
   var log = loadLog(); if (!log.length) return;
   var head = ['timestamp', 'date', 'time', 'sample_point', 'reagent', 'species', 'chlorine_mg_L',
-    'over_range', 'range_lo_mg_L', 'range_hi_mg_L', 'phed_card_band', 'verdict', 'use', 'dilution', 'reaction_time_s', 'absorbance', 'channel_sample', 'channel_white',
+    'over_range', 'range_lo_mg_L', 'range_hi_mg_L', 'phed_card_band', 'verdict', 'use', 'dilution', 'absorbance', 'channel_sample', 'channel_white',
     'temperature_C', 'pH', 'cyanuric_acid_mg_L', 'hocl_fraction', 'active_chlorine_mg_L',
     'latitude', 'longitude', 'source'];
   var lines = [head.map(csvCell).join(',')];
@@ -1055,7 +1018,7 @@ function exportHistory() {
       r.reagent || 'DPD', r.speciesLabel || 'Free chlorine', fmt(r.conc, 2), r.overRange ? 'yes' : 'no',
       r.concLo != null ? r.concLo : '', r.concHi != null ? r.concHi : '', r.cardBand || '',
       r.bandLabel || '', r.use || '', r.dilution != null ? r.dilution : '',
-      r.reactionS != null ? r.reactionS : (r.species === 'total' ? 'not recorded' : ''),
+
       r.absorbance != null ? r.absorbance : '', r.chSample != null ? fmt(r.chSample, 1) : '',
       r.chWhite != null ? fmt(r.chWhite, 1) : '', r.temp != null ? r.temp : '', r.ph != null ? r.ph : '',
       r.cya != null ? r.cya : '', r.hoclFraction != null ? r.hoclFraction : '',
@@ -1091,8 +1054,8 @@ function fitText(cx, s, x, y, maxW, size, bold) {
 function stampImage(srcEl, w, h, r) {
   var rg = R();
   var maxW = 900, sc = Math.min(1, maxW / w), cw = Math.round(w * sc), ch = Math.round(h * sc);
-  var site = ($('siteName').value || '').trim();
-  var tv = $('temp').value, pv = $('ph').value;
+  var site = (val('siteName') || '').trim();
+  var tv = val('temp'), pv = val('ph');
   var hasTP = (tv !== '' || pv !== '');
   var band = Math.round(cw * (0.44 + (site ? 0.06 : 0) + (hasTP ? 0.06 : 0)));
   var cv = $('stampCanvas'); cv.width = cw; cv.height = ch + band;
@@ -1193,12 +1156,6 @@ function buildReportDoc() {
   }
   if (r.cardBand) method.push(['PHED OTO card', r.cardBand]);
   method.push(['Dilution', r.dilution > 1 ? '1:' + (r.dilution - 1) + ' with chlorine-free water (x' + r.dilution + ')' : 'undiluted']);
-  if (r.species === 'total' && !r.manual) {
-    method.push(['Reaction time', r.reactionS == null
-      ? 'not recorded'
-      : Math.floor(r.reactionS / 60) + ' min ' + (r.reactionS % 60) + ' s' +
-        (r.reactionS <= 120 ? ' (read promptly, per PHED protocol)' : ' - DELAYED, reads high')]);
-  }
   if (r.temp != null) method.push(['Water temperature', fmt(r.temp, 1) + ' °C']);
   if (r.ph != null) method.push(['pH', fmt(r.ph, 2)]);
   if (r.cya != null) method.push(['Cyanuric acid', fmt(r.cya, 0) + ' mg/L']);
@@ -1222,12 +1179,6 @@ function buildReportDoc() {
       'methods even with perfect optics - roughly 90% of true for hypochlorite and inorganic chloramines, and as little ' +
       'as 50% for organic chloramines and real chlorinated pool water. Both errors point the same way as the total-vs-free ' +
       'problem: toward false reassurance.' });
-    if (r.reactionS != null && r.reactionS > 120) {
-      notes.push({ bold: true, rgb: [0.55, 0.27, 0],
-        text: 'Read ' + Math.floor(r.reactionS / 60) + ' min ' + (r.reactionS % 60) + ' s after mixing. The PHED protocol ' +
-          'requires the colour to be evaluated immediately, because it keeps rising and a delayed reading OVER-reports ' +
-          'the residual. Treat this figure as an over-estimate.' });
-    }
   } else if (r.species === 'total') {
     notes.push({ heading: 'Interpretation', bold: true, rgb: [0.63, 0, 0],
       text: 'Total chlorine is zero. Because total chlorine is the sum of free and combined chlorine, a total of zero ' +
@@ -1317,7 +1268,7 @@ function init() {
   requestGeo(); startCam(); renderHistory();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () { });
 }
-if (typeof document !== 'undefined' && document.getElementById('rgDpd')) init();
+if (typeof document !== 'undefined' && document.getElementById('camWrap')) init();
 
 // Exposed for the test harness (Node + headless browser).
 if (typeof module !== 'undefined' && module.exports) {

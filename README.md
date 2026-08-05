@@ -16,7 +16,7 @@ own site, with two additions: **OTO reagent support** and **PDF report download*
 | Channel read | green | blue |
 | Measures | **free** chlorine | **total** chlorine (free + combined) |
 | Calibrated range | 0.1 – 1.0 mg/L, fitted | 0.2 – 3 mg/L, **provisional ±40 %** |
-| Can demonstrate compliance? | yes | **no** — see below |
+| Can demonstrate compliance? | **no** — screening only | **no** — see below |
 
 ## The one thing to understand before using OTO
 

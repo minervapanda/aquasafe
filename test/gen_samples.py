@@ -151,6 +151,8 @@ def main():
         gates.append((name, "oto", "yellow vial detected",
                       f"{conc} mg/L is below the ~{cal['range']['camera_detection_floor_mg_l']} "
                       f"mg/L camera floor - too faint to separate from white paper"))
+    # rename: the message is reagent-agnostic now that the app detects the reagent itself
+    gates[-1] = (gates[-1][0], gates[-1][1], "No test vial found", gates[-1][3])
 
     # 1. Glare — >15% of the frame blown out to near-white.
     im = vial(WHITE, DPD_CARD[3][1:], seed=200)
@@ -164,15 +166,22 @@ def main():
     gates.append(("gate_no_white.png", "dpd", "white reference",
                   "Dark background, so no measured white to normalise against"))
 
-    # 3. Wrong reagent — a yellow OTO vial while DPD is selected.
-    vial(WHITE, oto_rgb(1.0, k_oto), seed=202).save(OUT / "gate_wrong_reagent.png")
-    gates.append(("gate_wrong_reagent.png", "dpd", "mismatch",
-                  "Yellow OTO vial captured with DPD selected"))
+    # 3. Auto-detection: a yellow vial is an OTO test whatever was selected before. The
+    #    app reads the reagent off the colour, so this can no longer be a "wrong reagent"
+    #    error - it must simply be measured as OTO.
+    r, g, b = oto_rgb(1.0, k_oto)
+    vial(WHITE, (r, g, b), seed=202).save(OUT / "autodetect_yellow.png")
+    manifest.append({
+        "file": "autodetect_yellow.png", "reagent": "oto", "use": "drinking",
+        "expect": "value", "expect_mg_l": round(oto_conc(b / 223.0, k_oto), 3), "tol": 0.08,
+        "card_mg_l": 1.0,
+        "why": "A yellow vial must be recognised as OTO with no reagent selection at all",
+    })
 
     # 4. Colourless sample. This is the dangerous one: zero chlorine and a blank vial
     #    look identical to a camera, so the app must refuse rather than report 0.00.
     vial(WHITE, (221, 221, 222), seed=203).save(OUT / "gate_colourless.png")
-    gates.append(("gate_colourless.png", "dpd", "pink vial detected",
+    gates.append(("gate_colourless.png", "dpd", "No test vial found",
                   "Colourless vial - indistinguishable from an empty one, must not be reported as a zero"))
 
     for f, reagent, needle, why in gates:
