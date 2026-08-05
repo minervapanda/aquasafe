@@ -585,7 +585,8 @@ async function testCaptureStrip(browser, base) {
   st = await read(page);
   check('over range: distinct state, shown as a bound', /\bover\b/.test(st.cls) && st.val.startsWith('>'),
     `cls=${st.cls} val="${st.val}"`);
-  check('over range: tells the user to dilute', /dilut/i.test(st.say), st.say.slice(0, 80));
+  check('over range: tells the user to dilute',
+    /dilut|half sample with half clean water/i.test(st.say), st.say.slice(0, 80));
   await page.close();
 
   // 5. Staleness — a strip must never outlive its reading.
@@ -792,6 +793,88 @@ async function testPhedProtocol(browser, base) {
   await page.close();
 }
 
+// The safety invariant lives in classify(), but it was defeated in the RENDER path: the
+// reagent was a mutable global that the 400 ms preview loop kept writing, while rerender —
+// bound to the location field's oninput, the one action the product directive mandates —
+// read it live. So typing a site name could turn a correctly-refused OTO total-chlorine
+// reading into a green free-chlorine pass. The old sweep test drove classify() directly
+// and could not see it.
+async function testResultIsFrozen(browser, base) {
+  console.log('\n\x1b[1mResult is frozen at capture\x1b[0m');
+  const page = await newPage(browser, base);
+  const input = await page.$('#photoInput');
+  await input.uploadFile(path.join(SAMPLES, 'oto_0p6.png'));
+  await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
+
+  const before = await page.evaluate(() => ({
+    species: window.lastReading.species, band: document.getElementById('clBand').className,
+    conc: window.lastReading.conc,
+  }));
+  check('OTO capture starts as total chlorine', before.species === 'total', before.species);
+
+  // Force the global to the other reagent, exactly as a drifting preview frame would,
+  // then do the one thing the operator is asked to do.
+  const after = await page.evaluate(() => {
+    window.reagentId = 'dpd';
+    document.getElementById('siteName').value = 'Ward 7 standpost';
+    rerender();
+    return {
+      species: window.lastReading.species, band: document.getElementById('clBand').className,
+      conc: window.lastReading.conc, reagent: window.lastReading.reagent,
+      caution: document.getElementById('otoCaution').style.display !== 'none',
+    };
+  });
+  check('typing the location cannot relabel the species', after.species === 'total',
+    `became ${after.species}`);
+  check('typing the location cannot turn a refusal into a pass', !/\bok\b/.test(after.band),
+    `band became "${after.band}"`);
+  check('typing the location cannot change the number', Math.abs(after.conc - before.conc) < 1e-9,
+    `${before.conc} -> ${after.conc}`);
+  check('the total-vs-free caution survives', after.caution, 'caution was hidden');
+
+  // The preview must not have been the thing that set it in the first place.
+  const preview = await page.evaluate(() => {
+    const before = window.reagentId;
+    const d = new Uint8ClampedArray(4 * 40000);
+    for (let i = 0; i < 40000; i++) {           // a frame full of pink
+      d[i * 4] = 231; d[i * 4 + 1] = 171; d[i * 4 + 2] = 208; d[i * 4 + 3] = 255;
+    }
+    analyzeAuto(d, 200, 200, false);            // commit = false, as checkROI calls it
+    return { before, after: window.reagentId };
+  });
+  check('the live preview never writes the global reagent', preview.before === preview.after,
+    `${preview.before} -> ${preview.after}`);
+  await page.close();
+}
+
+// Warm afternoon light must not flip a pink DPD test to yellow. This is the only path
+// that can ever issue a pass, so losing it in the field silently removes the pass.
+async function testWarmCastVote(browser, base) {
+  console.log('\n\x1b[1mReagent vote under a warm cast\x1b[0m');
+  const page = await newPage(browser, base);
+  const r = await page.evaluate(() => {
+    // Build a frame the way a phone sees one: warm-lit white paper, pink vial in the
+    // middle of the outline. Paper is most of the frame, which is what used to swamp it.
+    const W = 200, H = 300, d = new Uint8ClampedArray(4 * W * H);
+    const put = (o, c) => { d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 255; };
+    const out = {};
+    for (const [name, paper] of [['neutral', [240, 240, 240]], ['warm', [250, 246, 230]],
+                                 ['very warm', [252, 240, 214]]]) {
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const o = (y * W + x) * 4;
+        const inVial = x > W * 0.35 && x < W * 0.65 && y > H * 0.30 && y < H * 0.60;
+        put(o, inVial ? [231, 171, 208] : paper);
+      }
+      out[name] = pickReagent(d, W, H);
+    }
+    return out;
+  });
+  check('pink vial on neutral paper votes DPD', r.neutral === 'dpd', `got ${r.neutral}`);
+  check('pink vial on warm paper still votes DPD', r.warm === 'dpd', `got ${r.warm}`);
+  check('pink vial on very warm paper still votes DPD', r['very warm'] === 'dpd', `got ${r['very warm']}`);
+  await page.close();
+}
+
 async function testGuards(browser, base) {
   console.log('\n\x1b[1mSafety guards\x1b[0m');
   const page = await newPage(browser, base);
@@ -834,7 +917,7 @@ async function testGuards(browser, base) {
   const sweep = await page.evaluate(() => {
     setReagent('oto');
     const out = [];
-    for (const use of ['drinking', 'pool']) {
+    for (const use of ['drinking']) {
       setUse(use);
       for (const c of [0.05, 0.2, 0.5, 1, 1.5, 2, 3, 4, 5, 6, 10]) {
         out.push({ use, c, band: classify(c, REAGENTS.oto, USES[use]).band });
@@ -847,9 +930,14 @@ async function testGuards(browser, base) {
     `these did: ${JSON.stringify(passes)}`);
 
   // And the DPD path must still band normally, or the guard above is vacuous.
+  // 0.5 mg/L is compliant; 2.0 is above the IS 10500 permissible limit of 1.0, so it must
+  // NOT read as merely "high" — that would imply headroom the standard does not give.
   const dpdOk = await page.evaluate(() =>
-    classify(0.5, REAGENTS.dpd, USES.drinking).band + '/' + classify(2, REAGENTS.dpd, USES.pool).band);
-  check('DPD still bands compliant readings as "ok"', dpdOk === 'ok/ok', `got ${dpdOk}`);
+    classify(0.5, REAGENTS.dpd, USES.drinking).band + '/' + classify(2, REAGENTS.dpd, USES.drinking).band);
+  check('DPD bands 0.5 compliant and 2.0 as an exceedance', dpdOk === 'ok/vhigh', `got ${dpdOk}`);
+  // The pool profile is gone, so no pass can be computed outside the DPD fitted range.
+  const noPool = await page.evaluate(() => Object.keys(USES));
+  check('only the drinking-water profile exists', noPool.length === 1 && noPool[0] === 'drinking', `${noPool}`);
 
   // A measurement must never be computed against an assumed white reference.
   const noWhite = await page.evaluate(() => {
@@ -895,6 +983,8 @@ async function testGuards(browser, base) {
     await testCaptureStrip(browser, base);
     await testA11yRegressions(browser, base);
     await testCalibrationMatchesCode(browser, base);
+    await testResultIsFrozen(browser, base);
+    await testWarmCastVote(browser, base);
     await testGuards(browser, base);
   } finally {
     await browser.close();
