@@ -101,6 +101,10 @@ var criticalShown = false;
 // Frozen at capture. Everything that renders, stamps, logs or prints reads THESE, never
 // the live globals, so nothing that happens after the shutter can re-interpret a result.
 var resultRgId = null, resultUseId = null, resultTs = null;
+// How the reagent on a finished reading was established. The tab is always the source;
+// this records whether the photo's own colour vote agreed with it, was unable to confirm
+// it, or did not apply (a typed card reading). Frozen at capture like the rest.
+var resultCross = null;
 
 // The app is used in both the US and India, so dates follow the device's REGION
 // (7/24/2026 vs 24/07/2026) — but the language is pinned to English and digits to
@@ -280,22 +284,41 @@ function pickReagent(d, w, h) {
   // operator is told what to actually do about it.
   return 'tie';
 }
-// `commit` is false for the 400 ms live preview. The preview needs a reading to draw its
-// own feedback, but it must NEVER write the global reagent: that global is read again when
-// the result is re-rendered, so a phone drifting on the bench between the shot and the
-// operator typing the location could silently re-interpret a finished OTO result as DPD.
+// The TAB decides; the colour vote only gets a veto.
+//
+// The operator selects DPD or OTO and that selection is the sole authority over which
+// chemistry, which channel and which scale are used — nothing here ever writes reagentId.
+// An earlier version did the opposite (read the reagent off the photo and ignored any
+// selection), which removed a real field error but also meant a phone drifting on the
+// bench between the shot and the operator typing the location could silently re-interpret
+// a finished OTO result as DPD.
+//
+// What the vote still buys is the failure the tabs on their own cannot catch: a yellow OTO
+// vial photographed with DPD selected. analyzePixels would happily run the DPD pass on it —
+// and because the white reference is chosen by brightness in the MEASURING channel, that
+// pass picks its reference off the vial itself and hallucinates pink out of the edges, so
+// it returns a confident free-chlorine number off entirely the wrong scale. pickReagent
+// decides independently of that pass (its own reference, chosen by the minimum of the three
+// channels), so its disagreement is trustworthy evidence. On disagreement the reading is
+// refused outright — never quietly recomputed on the other scale, because the operator's
+// declaration is a fact about what is in the vial and the app is not entitled to overrule it.
+//
+// `commit` is false for the 400 ms live preview and is now only a label: with reagentId
+// left alone there is no longer any state for the preview to corrupt.
 function analyzeAuto(d, w, h, commit) {
-  var prev = reagentId, pick = pickReagent(d, w, h);
-  if (pick === 'tie') {
-    var amb = analyzePixels(d);
-    amb.ambiguous = true;
-    return amb;
-  }
-  if (pick) reagentId = pick;
+  var pick = pickReagent(d, w, h);
   var out = analyzePixels(d);
   out.reagentId = reagentId;
   out.picked = pick;
-  if (!commit) reagentId = prev;
+  // 'agree'      — the vial colour matches the selected tab
+  // 'mismatch'   — it clearly matches the OTHER tab: refuse, and say which
+  // 'unconfirmed'— colour present but neither dominates ('tie'), or no colour found at
+  //                all (null). Not a contradiction, so it is not treated as one here;
+  //                the 'no vial' and 'cannot tell' gates below handle it, and what does
+  //                reach a record is marked as un-cross-checked.
+  if (pick === reagentId) out.crossCheck = 'agree';
+  else if (pick === 'dpd' || pick === 'oto') { out.crossCheck = 'mismatch'; out.looksLike = pick; }
+  else { out.crossCheck = 'unconfirmed'; if (pick === 'tie') out.ambiguous = true; }
   return out;
 }
 
@@ -516,11 +539,20 @@ function classify(conc, rg, u, overRange, manual) {
   rg = rg || R(); u = u || U();
   if (conc <= 0.049 && !overRange) return { band: 'zero', label: 'ZERO — unsafe', critical: true };
 
-  // A number typed off a colour card has UNKNOWN provenance: with no reagent control, the
-  // app cannot tell whether the operator read a DPD (free) card or an OTO (total) one, and
-  // those are different quantities. It may therefore never render a typed value as a pass.
-  // Zero is still sound, because zero on either card means zero chlorine.
-  if (manual) return { band: 'info', label: 'Typed from your colour card — not checked by the app' };
+  // A typed number used to be refused a verdict outright, and the stated reason was that
+  // with no reagent control the app could not tell whether the operator had read a DPD
+  // (free) card or an OTO (total) one — different quantities. The tabs restore that
+  // control, so the reason is gone and a typed DPD reading is judged again, exactly as it
+  // was before the tabs were removed. What does NOT come back is any pretence that the app
+  // measured it: the band is labelled as a card reading, and the record says so.
+  //
+  // The OTO restriction below is untouched, because it never rested on reagent control —
+  // total >= free is chemistry. A typed OTO number still cannot render as a pass.
+  if (manual && rg.species !== 'total') {
+    if (conc < u.min) return { band: 'low', label: 'Card reading: low (<' + u.min + ') — under-chlorinated' };
+    if (conc <= u.idealHigh) return { band: 'ok', label: 'Card reading: within range (' + u.min + '–' + u.idealHigh + ' mg/L)' };
+    return { band: 'vhigh', label: 'Card reading: above the ' + u.max + ' mg/L limit' };
+  }
 
   if (rg.species === 'total') {
     if (overRange) return { band: 'high', label: 'Over range — dilute and re-test' };
@@ -539,12 +571,21 @@ function classify(conc, rg, u, overRange, manual) {
 // ---------------------------------------------------------------------------
 // UI wiring
 // ---------------------------------------------------------------------------
-// Kept as functions because the engine and the test suite drive them, but they are no
-// longer controls: the reagent is read off the vial colour, and the application defaults
-// to drinking water (pool operators have PoolCheck).
+// The reagent tab. This is a real control again: what the operator picks here is the only
+// thing that decides which chemistry is used, and the app never overrides it.
+//
+// Switching tabs CLEARS any result on screen. It cannot reinterpret one — every rendered
+// result reads the reagent frozen at capture (resultRgId), not this global — but leaving a
+// finished free-chlorine number sitting under the OTO tab invites the operator to save it
+// against the wrong test. A result belongs to the tab it was taken on.
 function setReagent(id) {
   if (!REAGENTS[id]) return;
+  var changed = (id !== reagentId);
   reagentId = id;
+  if (changed && lastResult) {
+    clearResult('Test type changed to <b>' + REAGENTS[id].name + '</b>. Take the photo again — ' +
+      'a reading belongs to the test it was taken on, so the previous one has been cleared.');
+  }
   syncReagentUI();
 }
 function setUse(id) {
@@ -553,35 +594,75 @@ function setUse(id) {
   syncReagentUI();
   rerender();
 }
-// One set of instructions, because the operator no longer picks a reagent — the app
-// reads which one is in the vial off the photograph.
-var SOP = [
-  'Fill the vial to <b>10 mL</b> with the water you are testing.',
-  'If the water is <b>muddy or cloudy</b>, let it stand until it clears, or filter it. Then test.',
-  'Add your chlorine reagent — <b>DPD</b> (turns pink) or <b>OTO</b> (turns yellow) — and mix.',
-  'Photograph it <b>straight away</b> — within 1 minute. Waiting changes the colour and the reading goes wrong.',
-  'Hold the vial against <b>plain white paper</b>, fill the outline, and tap the picture.'
-];
+// One set of instructions PER TAB. The two tests are different procedures — different
+// reagent, different timing, different failure colours — and merging them was only
+// possible while the app was choosing the reagent itself.
+//
+// Both keep the PHED field protocol adopted in 6b49391: photograph immediately after
+// mixing. The 5-minute OTO reaction timer that shipped with the first tabbed version is
+// deliberately NOT restored — it belongs to the read-at-5-minutes-for-total convention,
+// which that protocol replaced. The timing note in each list is the current one.
+var SOP_BY_REAGENT = {
+  dpd: [
+    'Fill the vial to <b>10 mL</b> with the water you are testing.',
+    'If the water is <b>muddy or cloudy</b>, let it stand until it clears, or filter it. Then test.',
+    'Add the <b>DPD No.1</b> reagent (tablet or powder) and mix until an even <b>pink</b> appears.',
+    'Photograph it <b>within 1 minute</b>. DPD pink fades on standing, so a late photo reads <b>LOW</b>.',
+    'Hold the vial against <b>plain white paper</b>, fill the outline, and tap the picture.'
+  ],
+  oto: [
+    'Fill the vial to <b>10 mL</b> with the water you are testing.',
+    'If the water is <b>muddy or cloudy</b>, let it stand until it clears, or filter it. Then test.',
+    'Add the <b>acid OTO</b> reagent (usually 3–4 drops) and mix until an even <b>yellow</b> appears.',
+    'Photograph it <b>straight away</b> — PHED protocol. OTO colour keeps rising, so a late photo reads <b>HIGH</b>.',
+    'If the vial is <b>blue-green</b> the reagent is stale or not acidic enough; if it is <b>orange or brown</b> the chlorine is too high to photograph. Neither can be read.',
+    'Hold the vial against <b>plain white paper</b>, fill the outline, and tap the picture.'
+  ]
+};
 // o-Tolidine is a suspect carcinogen: dropped from Standard Methods in 1975 on accuracy,
 // the neutral variant in 1980 on toxicity, and prohibited for drinking-water testing in
 // Japan since 2002. These kits go to village-level workers, so the handling caution
 // belongs on the screen, not in a developer's README.
 var SAFETY = 'The <b>yellow (OTO)</b> reagent is harmful. Keep it off your skin and away ' +
   'from your mouth. Wash your hands after the test. Use the <b>pink (DPD)</b> reagent whenever you have it.';
-var CHIPS = ['1 · Fill 10 mL', '2 · Add reagent', '3 · Photograph', '4 · Result'];
+var CHIPS_BY_REAGENT = {
+  dpd: ['1 · Fill 10 mL', '2 · Add DPD', '3 · Photograph', '4 · Result'],
+  oto: ['1 · Fill 10 mL', '2 · Add OTO', '3 · Photograph', '4 · Result']
+};
+// What each tab measures, said in the words that matter rather than the chemistry. The
+// OTO line states the limit up front, because "total chlorine" reads to most operators as
+// "chlorine" and the whole point is that it cannot confirm a safe free residual.
+var TAB_NOTE = {
+  dpd: 'Measures <b>free chlorine</b> — the disinfectant still working in the water. This is the number IS 10500 sets a limit on.',
+  oto: 'Measures <b>total chlorine</b> — free plus already-used chlorine. It can show you that chlorine is <b>absent</b>, but it can never confirm that enough <b>free</b> chlorine is present. Use DPD where you have it.'
+};
 function syncReagentUI() {
   var rg = R(), u = U();
-  $('sopBox').innerHTML = '<b>How to test</b><ol>' +
-    SOP.map(function (x) { return '<li>' + x + '</li>'; }).join('') + '</ol>' +
-    '<div style="margin-top:10px;padding:9px 11px;background:#fff5e0;border-left:4px solid var(--amber);' +
-    'border-radius:7px;color:#5c4200">⚠ ' + SAFETY + '</div>';
+  // Tab state, kept in sync with reagentId so the test harness and the buttons agree.
+  ['dpd', 'oto'].forEach(function (id) {
+    var b = $(id === 'dpd' ? 'rgDpd' : 'rgOto'); if (!b) return;
+    b.className = (id === reagentId) ? 'on' : '';
+    b.setAttribute('aria-selected', id === reagentId ? 'true' : 'false');
+  });
+  var seg = $('segReagent'); if (seg) seg.className = 'seg ' + rg.segClass;
+  var panel = $('testPanel'); if (panel) panel.setAttribute('aria-labelledby', rg.id === 'dpd' ? 'rgDpd' : 'rgOto');
+  setHTML('reagentNote', TAB_NOTE[rg.id]);
+  setText('testHeading', '2 · Take the ' + rg.name + ' test');
+  $('sopBox').innerHTML = '<b>How to run the ' + rg.name + ' test</b><ol>' +
+    SOP_BY_REAGENT[rg.id].map(function (x) { return '<li>' + x + '</li>'; }).join('') + '</ol>' +
+    // The o-tolidine handling caution belongs on the OTO tab, where it applies, rather
+    // than on every screen where it becomes wallpaper.
+    (rg.id === 'oto' ? '<div style="margin-top:10px;padding:9px 11px;background:#fff5e0;border-left:4px solid var(--amber);' +
+      'border-radius:7px;color:#5c4200">⚠ ' + SAFETY + '</div>' : '');
   // Uniform, never highlighted. The chips are a printed procedure, not a progress
   // indicator — nothing advances them, so marking step 1 "current" told every user they
   // were at the start no matter where they actually were.
-  $('stepChips').innerHTML = CHIPS.map(function (c) {
+  $('stepChips').innerHTML = CHIPS_BY_REAGENT[rg.id].map(function (c) {
     return '<span>' + esc(c) + '</span>';
   }).join('');
-  $('resultHeading').textContent = rg.speciesLabel;
+  // The LIVE tab's label while no result exists; renderResult overwrites it with the
+  // frozen one as soon as there is a reading, so the heading can never outlive its result.
+  if (!lastResult) $('resultHeading').textContent = rg.speciesLabel;
   $('footNote').innerHTML = 'A screening aid, not a laboratory test. Always confirm an ' +
     'important result against your colour card.<br>' + esc(u.standard);
 }
@@ -649,13 +730,41 @@ function gateReasons(s) {
     longMsg: '<b>No white reference.</b> Place the vial against plain white paper in even light and retake — a reading without a measured white reference is unreliable.' };
   if (s.clamped) return { ok: false, shortMsg: 'Reading not possible — retake',
     longMsg: '<b>The vial looks brighter than the paper.</b> The light is coming through the vial instead of off the paper, so nothing could be measured. Hold the white paper flat behind the vial, with the light on the paper, and take the photo again.' };
+  // THE WRONG-TAB VETO. Checked before "no vial", because on a mismatch s.detected is not
+  // evidence of anything: the DPD pass on a yellow vial can report a confident detection
+  // built out of its own misplaced white reference. This is the one failure the tabs cannot
+  // catch on their own, and it is the dangerous kind — a number on the wrong scale, with
+  // every other gate passing. The app does NOT switch tabs for the operator: it says what
+  // it sees and stops.
+  if (s.crossCheck === 'mismatch') {
+    var sel = rg, saw = REAGENTS[s.looksLike];
+    return { ok: false, shortMsg: 'This looks like a ' + saw.colourWord + ' ' + saw.name + ' vial',
+      longMsg: '<b>The vial does not match the test you selected.</b> You are on the <b>' +
+        sel.name + '</b> tab, which reads a <b>' + sel.colourWord + '</b> vial as <b>' +
+        sel.speciesLabel.toLowerCase() + '</b> — but this vial looks <b>' + saw.colourWord +
+        '</b>, which is the <b>' + saw.name + '</b> test and measures <b>' +
+        saw.speciesLabel.toLowerCase() + '</b>. These are different chemistries read on ' +
+        'different scales, so a number here would be wrong, not just imprecise.<br><br>' +
+        'If this really is a ' + saw.name + ' test, switch to the <b>' + saw.name +
+        '</b> tab above and photograph it again. If it is a ' + sel.name +
+        ' test, check the lighting — a strong colour cast can change how the vial looks.' };
+  }
   if (s.ambiguous) return { ok: false, shortMsg: 'Cannot tell pink from yellow — move closer',
-    longMsg: '<b>The app cannot tell which test this is.</b> A <b>pink</b> vial is a DPD test and a <b>yellow</b> vial is an OTO test, and they are read in different ways. Move closer so the vial fills the outline, keep plain white paper behind it, and take the photo again.' };
+    longMsg: '<b>The app cannot confirm which test this is.</b> A <b>pink</b> vial is a DPD test and a <b>yellow</b> vial is an OTO test, and they are read in different ways — so before it reports a number it checks that the vial matches the <b>' + rg.name + '</b> tab you selected. It cannot see that clearly here. Move closer so the vial fills the outline, keep plain white paper behind it, and take the photo again.' };
   if (!s.detected) {
-    // There is no reagent to have got wrong any more, so there is one message: the app
-    // could not find a coloured vial at all.
-    return { ok: false, shortMsg: 'Move the vial inside the outline',
-      longMsg: '<b>No test vial found.</b> Hold the vial inside the outline with plain white paper behind it, and take the photo again. If the water has no colour at all, read your colour card instead — this app will not report a zero it cannot see.' };
+    // Second, weaker mismatch signal, kept from the pre-tab version: the colour vote
+    // abstained, but the sample-pixel pass found enough of the OTHER reagent's colour to
+    // name it. Worth saying, because "no vial found" would send the operator to fix the
+    // framing when the real problem is the tab.
+    if (s.wrongReagent) return { ok: false,
+      shortMsg: 'That vial looks ' + s.otherColour + ' — ' + rg.name + ' is selected',
+      longMsg: '<b>The vial does not match the test you selected.</b> <b>' + rg.name +
+        '</b> is selected, which expects a <b>' + rg.colourWord + '</b> vial, but this one looks <b>' +
+        s.otherColour + '</b> — the <b>' + s.otherName + '</b> colour. Switch to the <b>' +
+        s.otherName + '</b> tab above, or re-run the test with the ' + rg.name + ' reagent.' };
+    return { ok: false, shortMsg: 'Align the ' + rg.colourWord + ' vial in the outline',
+      longMsg: '<b>No ' + rg.colourWord + ' vial found.</b> Hold the ' + rg.name +
+        ' vial inside the outline with plain white paper behind it, and take the photo again. If the water has no colour at all, read your colour card instead — this app will not report a zero it cannot see.' };
   }
   if (s.offChannel && s.offChannel.suspect) return { ok: false,
     shortMsg: 'Colour is not a clean yellow — check the reagent',
@@ -822,7 +931,7 @@ function loadPhoto(ev) {
 // not leave a stale reading one tap away from the log.
 function clearResult(noteHtml) {
   lastReading = null; lastResult = null; lastCapture = null;
-  resultRgId = null; resultUseId = null; resultTs = null;
+  resultRgId = null; resultUseId = null; resultTs = null; resultCross = null;
   dilutionState = 1;                 // never carry an answer into the next sample
   var dn = $('dilNo'), dy = $('dilYes');
   if (dn) dn.className = 'on';
@@ -857,6 +966,7 @@ function finishTest(s, srcEl, w, h) {
   lastCapture = { frame: frame, w: w, h: h };
 
   resultRgId = reagentId; resultUseId = useId; resultTs = new Date();
+  resultCross = s.crossCheck || 'unconfirmed';
   var r = concFromChannel(s.sample, s.ref, dilutionFactor());
   criticalShown = false;
   renderResult(r, { s: s.sample, ref: s.ref });
@@ -893,6 +1003,9 @@ function renderResult(r, px) {
   var rg = (r.manual || !resultRgId) ? R() : REAGENTS[resultRgId];
   var u = USES[resultUseId || useId];
   var c = classify(r.conc, rg, u, r.overRange, r.manual);
+  // The heading follows the FROZEN reagent, so a result can never sit under the label of
+  // a tab it was not taken on.
+  setText('resultHeading', rg.speciesLabel);
 
   // The OTO constant carries +/-40% in BOTH directions, and that interval straddles the
   // 0.2 mg/L adequacy threshold. Publishing a bare "0.21 mg/L" would imply a precision
@@ -930,6 +1043,10 @@ function renderResult(r, px) {
   }
   if (r.overRange) note += ' The colour is too dark to measure, so the real value is higher than this. Mix half sample with half clean water and test again.';
   else if (r.extrapolated) note += ' This is near the top of what the test can measure. Mix half sample with half clean water and test again to check it.';
+  // Say plainly where the number came from. A typed reading is the operator's own reading
+  // of their card; the app judged it against the standard but did not measure it.
+  if (r.manual) note += ' This is the value you typed from your colour card — the app has not measured it.';
+  else if (resultCross === 'unconfirmed') note += ' The app could not double-check the vial colour against the ' + rg.name + ' tab on this photo, so the test type is on your word alone.';
   $('clNote').textContent = note;
 
   // The total-vs-free caveat gets its own persistent block, not a footnote.
@@ -973,6 +1090,12 @@ function renderResult(r, px) {
     concOpen: iv ? !!iv.open : false,
     transmittance: (r.T != null && isFinite(r.T)) ? parseFloat(r.T.toFixed(4)) : null,
     band: c.band, bandLabel: c.label, manual: !!r.manual,
+    // Provenance. On a compliance record it matters not just WHICH test was run but on
+    // whose word: the operator selected the tab, and the photo either backed that up or
+    // could not. 'unconfirmed' is not a failure - it is a reading the colour check
+    // abstained on - but it must not be indistinguishable from a confirmed one.
+    reagentSource: r.manual ? 'typed from colour card' : 'selected by operator',
+    crossCheck: r.manual ? null : (resultCross || 'unconfirmed'),
     dilution: dilutionFactor(), absorbance: (r.A != null && isFinite(r.A)) ? parseFloat(r.A.toFixed(4)) : null,
     chSample: px ? px.s : null, chWhite: px ? px.ref : null,
     temp: tempN, ph: phN, cya: cya,
@@ -1091,7 +1214,7 @@ function exportHistory() {
   var head = ['timestamp', 'date', 'time', 'operator', 'sample_point', 'reagent', 'species', 'chlorine_mg_L',
     'over_range', 'range_lo_mg_L', 'range_hi_mg_L', 'phed_card_band', 'verdict', 'use', 'dilution', 'absorbance', 'channel_sample', 'channel_white',
     'temperature_C', 'pH', 'cyanuric_acid_mg_L', 'hocl_fraction', 'active_chlorine_mg_L',
-    'latitude', 'longitude', 'source'];
+    'latitude', 'longitude', 'source', 'reagent_source', 'colour_cross_check'];
   var lines = [head.map(csvCell).join(',')];
   log.forEach(function (r) {
     var d = new Date(r.ts);
@@ -1104,7 +1227,11 @@ function exportHistory() {
       r.chWhite != null ? fmt(r.chWhite, 1) : '', r.temp != null ? r.temp : '', r.ph != null ? r.ph : '',
       r.cya != null ? r.cya : '', r.hoclFraction != null ? r.hoclFraction : '',
       r.activeCl != null ? r.activeCl : '', r.lat != null ? r.lat : '', r.lon != null ? r.lon : '',
-      r.manual ? 'manual card' : 'photo'].map(csvCell).join(','));
+      r.manual ? 'manual card' : 'photo',
+      // Older rows predate the tabs and were auto-detected; say so rather than
+      // back-filling them with a selection that never happened.
+      r.reagentSource || 'auto-detected (pre-tab record)',
+      r.crossCheck || ''].map(csvCell).join(','));
   });
   // UTF-8 BOM so Excel decodes non-ASCII sample-point names; CRLF per RFC 4180
   var blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });

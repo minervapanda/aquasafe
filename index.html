@@ -166,7 +166,22 @@
   <p class="sr-only" id="capLive" role="status" aria-live="polite" aria-atomic="true"></p>
 
   <div class="card">
-    <h2>1 · Take the test</h2>
+    <h2>1 · Which test are you running?</h2>
+    <!-- The operator declares the reagent, and that declaration is the ONLY thing that
+         decides which chemistry, which channel and which scale are used. The app still
+         looks at the vial colour, but only to VETO a contradiction (see pickReagent /
+         gateReasons) - it can never silently switch the tab under a finished reading. -->
+    <div class="seg" id="segReagent" role="tablist" aria-label="Chlorine test type">
+      <button type="button" id="rgDpd" class="on" role="tab" aria-selected="true"
+              aria-controls="testPanel" onclick="setReagent('dpd')">DPD <small>pink · free chlorine</small></button>
+      <button type="button" id="rgOto" role="tab" aria-selected="false"
+              aria-controls="testPanel" onclick="setReagent('oto')">OTO <small>yellow · total chlorine</small></button>
+    </div>
+    <div class="note" id="reagentNote"></div>
+  </div>
+
+  <div class="card" id="testPanel" role="tabpanel" aria-labelledby="rgDpd">
+    <h2 id="testHeading">2 · Take the test</h2>
     <div class="sop" id="sopBox"></div>
     <div class="stepchip" id="stepChips"></div>
 
@@ -220,7 +235,7 @@
        down about a reading you have already taken. Editing any of them re-runs the
        calculation AND re-stamps the photo, so the record cannot disagree with itself. -->
   <div class="card">
-    <h2>2 · Save the record</h2>
+    <h2>3 · Save the record</h2>
     <!-- Entered once and remembered on the device, so it costs no typing per sample. A
          supervisor cannot accept a reading from a junior operator on a record that does
          not say who took it. -->
@@ -246,7 +261,7 @@
   </div>
 
   <div class="card" id="recordBlock" style="display:none">
-    <h2>3 · Test record</h2>
+    <h2>4 · Test record</h2>
     <div class="note">The photo is stamped with the sample point, reagent, result, coordinates (if allowed) and timestamp at capture. Address &amp; map load when online.</div>
     <canvas id="stampCanvas" class="stamped"></canvas>
     <div class="btn2">

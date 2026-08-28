@@ -174,8 +174,9 @@ def main():
         gates.append((name, "oto", "yellow vial detected",
                       f"{conc} mg/L is below the ~{cal['range']['camera_detection_floor_mg_l']} "
                       f"mg/L camera floor - too faint to separate from white paper"))
-    # rename: the message is reagent-agnostic now that the app detects the reagent itself
-    gates[-1] = (gates[-1][0], gates[-1][1], "No test vial found", gates[-1][3])
+    # The refusal names the colour the SELECTED TAB expects, which is what the operator
+    # can act on: on the OTO tab a vial too faint to measure reads as "no yellow vial".
+    gates[-1] = (gates[-1][0], gates[-1][1], "No yellow vial found", gates[-1][3])
 
     # 1. Glare — >15% of the frame blown out to near-white.
     im = vial(WHITE, DPD_CARD[3][1:], seed=200)
@@ -204,7 +205,7 @@ def main():
     # 4. Colourless sample. This is the dangerous one: zero chlorine and a blank vial
     #    look identical to a camera, so the app must refuse rather than report 0.00.
     vial(WHITE, (221, 221, 222), seed=203).save(OUT / "gate_colourless.png")
-    gates.append(("gate_colourless.png", "dpd", "No test vial found",
+    gates.append(("gate_colourless.png", "dpd", "No pink vial found",
                   "Colourless vial - indistinguishable from an empty one, must not be reported as a zero"))
 
     for f, reagent, needle, why in gates:

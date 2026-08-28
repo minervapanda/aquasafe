@@ -81,8 +81,9 @@ async function newPage(browser, base) {
 
 async function runSample(browser, base, m) {
   const page = await newPage(browser, base);
-  // Deliberately NOT setting the reagent: the app must work it out from the photo.
-  await page.evaluate(u => setUse(u), m.use);
+  // The operator selects the test on a tab, and that selection is what drives the maths.
+  // The photo's own colour vote is a cross-check only, asserted separately below.
+  await page.evaluate((r, u) => { setReagent(r); setUse(u); }, m.reagent || 'dpd', m.use);
 
   const input = await page.$('#photoInput');
   await input.uploadFile(path.join(SAMPLES, m.file));
@@ -102,6 +103,8 @@ async function runSample(browser, base, m) {
     conc: window.lastReading ? window.lastReading.conc : null,
     species: window.lastReading ? window.lastReading.species : null,
     reagent: window.lastReading ? window.lastReading.reagent : null,
+    crossCheck: window.lastReading ? window.lastReading.crossCheck : null,
+    reagentSource: window.lastReading ? window.lastReading.reagentSource : null,
     overRange: window.lastReading ? window.lastReading.overRange : null,
     caution: document.getElementById('otoCaution').style.display !== 'none',
     cautionText: document.getElementById('otoCaution').textContent,
@@ -127,9 +130,14 @@ async function runSample(browser, base, m) {
     } else {
       check(`${m.file}: reported as FREE chlorine`, state.species === 'free', `species=${state.species}`);
     }
-    // The operator never picks a reagent, so every fixture doubles as an auto-detect test.
-    check(`${m.file}: reagent auto-detected as ${m.reagent.toUpperCase()}`,
-      state.reagent === m.reagent.toUpperCase(), `detected ${state.reagent}`);
+    check(`${m.file}: recorded against the ${m.reagent.toUpperCase()} tab`,
+      state.reagent === m.reagent.toUpperCase(), `recorded ${state.reagent}`);
+    // The tab decides, but the colour vote must still back it up on a clean fixture —
+    // that agreement is what makes the wrong-tab veto trustworthy in the field.
+    check(`${m.file}: colour cross-check agrees with the tab`,
+      state.crossCheck === 'agree', `crossCheck=${state.crossCheck}`);
+    check(`${m.file}: record says the operator selected it`,
+      state.reagentSource === 'selected by operator', `reagentSource=${state.reagentSource}`);
     check(`${m.file}: offers save + record`, state.saveShown && state.recordShown,
       `save=${state.saveShown} record=${state.recordShown}`);
   } else if (m.expect === 'overrange') {
@@ -681,8 +689,7 @@ async function testFieldCaptures(browser, base) {
   for (const m of manifest) {
     if (m.expect === 'skip') continue;   // calibration source, not a fixture
     const page = await newPage(browser, base);
-    // No reagent selection — a real operator no longer makes one.
-    await page.evaluate(u => setUse(u), m.use);
+    await page.evaluate((r, u) => { setReagent(r); setUse(u); }, m.reagent || 'dpd', m.use);
     const input = await page.$('#photoInput');
     await input.uploadFile(path.join(dir, m.file));
     await page.waitForFunction(
@@ -704,8 +711,8 @@ async function testFieldCaptures(browser, base) {
     if (st.conc === null) { await page.close(); continue; }
 
     // The regression that matters: this frame must never go back to a bare lower bound.
-    check(`${m.file}: reagent auto-detected as ${m.reagent.toUpperCase()} from a real photo`,
-      st.reagent === m.reagent.toUpperCase(), `detected ${st.reagent}`);
+    check(`${m.file}: recorded against the ${m.reagent.toUpperCase()} tab`,
+      st.reagent === m.reagent.toUpperCase(), `recorded ${st.reagent}`);
     check(`${m.file}: not reported as over range`, st.over === false,
       `over range again — the operator gets ">${st.conc}" instead of a value`);
     check(`${m.file}: reads well above the old ${m.old_ceiling} ceiling`,
@@ -823,6 +830,7 @@ async function testPhedProtocol(browser, base) {
 async function testResultIsFrozen(browser, base) {
   console.log('\n\x1b[1mResult is frozen at capture\x1b[0m');
   const page = await newPage(browser, base);
+  await page.evaluate(() => setReagent('oto'));
   const input = await page.$('#photoInput');
   await input.uploadFile(path.join(SAMPLES, 'oto_0p6.png'));
   await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
@@ -910,8 +918,167 @@ async function testWarmCastVote(browser, base) {
   check('an ambiguous vial is refused, not guessed', tie.pick === 'tie' && tie.gate.ok === false,
     `pick=${tie.pick} ok=${tie.gate && tie.gate.ok}`);
   check('the refusal explains pink vs yellow',
-    /pink/i.test(tie.gate.longMsg) && /yellow/i.test(tie.gate.longMsg) && /cannot tell/i.test(tie.gate.longMsg),
+    /pink/i.test(tie.gate.longMsg) && /yellow/i.test(tie.gate.longMsg) && /cannot (tell|confirm)/i.test(tie.gate.longMsg),
     tie.gate.longMsg.slice(0, 120));
+  await page.close();
+}
+
+// ---------------------------------------------------------------------------
+// The wrong-tab veto
+// ---------------------------------------------------------------------------
+// The tabs give the operator back control over which chemistry runs. The failure that
+// buys is the one this covers: a yellow OTO vial photographed with DPD selected. Left
+// alone, analyzePixels runs the DPD pass on it, picks its white reference off the vial
+// itself and returns a confident free-chlorine number off entirely the wrong scale —
+// with every other gate passing. It must refuse, name what it saw, and NOT switch tabs
+// on the operator's behalf.
+async function testWrongTabVeto(browser, base) {
+  console.log('\n\x1b[1mWrong-tab veto\x1b[0m');
+
+  for (const [tab, file, saw] of [['dpd', 'oto_1p5.png', 'OTO'], ['oto', 'dpd_0p5.png', 'DPD']]) {
+    if (!fs.existsSync(path.join(SAMPLES, file))) {
+      check(`${tab.toUpperCase()} tab + ${saw} vial: fixture present`, false, `${file} missing`);
+      continue;
+    }
+    const page = await newPage(browser, base);
+    await page.evaluate(r => { setReagent(r); setUse('drinking'); }, tab);
+    const input = await page.$('#photoInput');
+    await input.uploadFile(path.join(SAMPLES, file));
+    await page.waitForFunction(
+      () => window.lastResult !== null || document.getElementById('clNote').textContent.length > 40,
+      { timeout: 8000 }).catch(() => {});
+
+    const st = await page.evaluate(() => ({
+      conc: window.lastReading ? window.lastReading.conc : null,
+      result: window.lastReading,
+      note: document.getElementById('clNote').textContent,
+      bandShown: document.getElementById('clBand').style.display !== 'none',
+      saveShown: document.getElementById('saveBtn').style.display !== 'none',
+      reagentId: window.reagentId,
+    }));
+
+    const label = `${tab.toUpperCase()} tab + ${saw} vial`;
+    // The whole point: no number at all.
+    check(`${label}: publishes no number`, st.conc === null && st.result === null,
+      `got ${st.conc} mg/L`);
+    check(`${label}: no verdict band`, !st.bandShown, 'a band was rendered');
+    check(`${label}: cannot be saved to the log`, !st.saveShown, 'save was offered');
+    // It has to say WHICH test it thinks this is, or the operator cannot act on it.
+    check(`${label}: names the mismatch`, /does not match the test you selected/i.test(st.note),
+      `note="${st.note.slice(0, 140)}"`);
+    check(`${label}: tells the operator which tab to switch to`,
+      new RegExp(saw, 'i').test(st.note) && /tab/i.test(st.note), st.note.slice(0, 160));
+    // And it must NOT quietly do it for them. Silently switching would reintroduce the
+    // exact behaviour the tabs were brought back to remove.
+    check(`${label}: does not switch the tab by itself`, st.reagentId === tab,
+      `tab became ${st.reagentId}`);
+    await page.close();
+  }
+}
+
+// Switching tabs must invalidate a finished reading. The rendered result reads the
+// reagent frozen at capture, so it can never be re-interpreted — but a free-chlorine
+// number left sitting under the OTO tab is one tap from being saved against the wrong
+// test, which is a records problem rather than a maths one.
+async function testTabSwitchClearsResult(browser, base) {
+  console.log('\n\x1b[1mSwitching tabs clears the reading\x1b[0m');
+  const page = await newPage(browser, base);
+  await page.evaluate(() => { setReagent('dpd'); setUse('drinking'); });
+  const input = await page.$('#photoInput');
+  await input.uploadFile(path.join(SAMPLES, 'dpd_0p5.png'));
+  await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
+
+  const before = await page.evaluate(() => ({
+    conc: window.lastReading.conc, species: window.lastReading.species,
+    heading: document.getElementById('resultHeading').textContent,
+  }));
+  check('DPD reading lands under the free-chlorine heading',
+    before.species === 'free' && /free/i.test(before.heading),
+    `species=${before.species} heading="${before.heading}"`);
+
+  const after = await page.evaluate(() => {
+    setReagent('oto');
+    return {
+      reading: window.lastReading, result: window.lastResult,
+      note: document.getElementById('clNote').textContent,
+      saveShown: document.getElementById('saveBtn').style.display !== 'none',
+      sop: document.getElementById('sopBox').textContent,
+      heading: document.getElementById('resultHeading').textContent,
+    };
+  });
+  check('switching tabs clears the previous reading', after.result === null,
+    'a result survived the switch');
+  check('switching tabs withdraws the save button', !after.saveShown, 'save was still offered');
+  check('switching tabs says why', /changed to/i.test(after.note) && /again/i.test(after.note),
+    after.note.slice(0, 140));
+  // Each tab carries its own procedure — that is the point of separating them.
+  check('the OTO tab shows the OTO procedure', /acid OTO/i.test(after.sop) && /yellow/i.test(after.sop),
+    after.sop.slice(0, 140));
+  check('the OTO tab carries the o-tolidine handling caution', /harmful/i.test(after.sop),
+    'safety note missing from the OTO tab');
+
+  const back = await page.evaluate(() => {
+    setReagent('dpd');
+    return { sop: document.getElementById('sopBox').textContent,
+             heading: document.getElementById('resultHeading').textContent };
+  });
+  check('the DPD tab shows the DPD procedure', /DPD No\.1/i.test(back.sop) && /pink/i.test(back.sop),
+    back.sop.slice(0, 140));
+  // DPD fades on standing and OTO keeps rising: the two tabs must not carry the same
+  // timing warning, because the error directions are opposite.
+  check('DPD warns the reading runs LOW when late', /\bLOW\b/.test(back.sop), back.sop.slice(0, 200));
+  check('OTO warns the reading runs HIGH when late', /\bHIGH\b/.test(after.sop), after.sop.slice(0, 200));
+  check('the free-chlorine heading is restored', /free/i.test(back.heading), back.heading);
+  await page.close();
+}
+
+// A number typed off the operator's own colour card.
+//
+// While the app chose the reagent itself, a typed value could never render as a pass: the
+// app had no way to know whether the operator had read a DPD (free) card or an OTO (total)
+// one, and those are different quantities. The tabs restore that knowledge, so a typed DPD
+// reading is judged against IS 10500 again, exactly as it was before the tabs were removed.
+// Two things must NOT come back with it: any suggestion the app measured the value, and any
+// possibility of an OTO total passing — that restriction never rested on reagent control,
+// because total >= free is chemistry.
+async function testTypedCardReading(browser, base) {
+  console.log('\n\x1b[1mTyped colour-card readings\x1b[0m');
+  const page = await newPage(browser, base);
+
+  const typed = async (tab, v) => page.evaluate((t, x) => {
+    setReagent(t); setUse('drinking');
+    document.getElementById('manualCl').value = String(x);
+    manualResult();
+    return {
+      band: document.getElementById('clBand').className,
+      label: document.getElementById('clBand').textContent,
+      note: document.getElementById('clNote').textContent,
+      species: window.lastReading.species,
+      source: window.lastReading.reagentSource,
+      cross: window.lastReading.crossCheck,
+    };
+  }, tab, v);
+
+  const ok = await typed('dpd', 0.5);
+  check('a typed DPD reading in range is judged compliant', /\bok\b/.test(ok.band),
+    `band="${ok.band}" label="${ok.label}"`);
+  check('the typed DPD verdict is labelled as a card reading', /card reading/i.test(ok.label), ok.label);
+  check('the note says the app did not measure it', /you typed/i.test(ok.note) && /not measured/i.test(ok.note),
+    ok.note.slice(0, 160));
+  check('the record marks the value as typed', ok.source === 'typed from colour card', ok.source);
+  check('a typed value carries no colour cross-check', ok.cross === null, `crossCheck=${ok.cross}`);
+
+  const low = await typed('dpd', 0.1);
+  check('a typed DPD reading below the floor is judged low', /\blow\b/.test(low.band), low.band);
+  const high = await typed('dpd', 2.0);
+  check('a typed DPD reading above the limit is judged an exceedance', /vhigh/.test(high.band), high.band);
+
+  // The invariant that does not move.
+  for (const v of [0.3, 0.6, 1.0, 2.5]) {
+    const t = await typed('oto', v);
+    check(`a typed OTO reading of ${v} mg/L still never passes`,
+      !/\bok\b/.test(t.band) && t.species === 'total', `band="${t.band}" species=${t.species}`);
+  }
   await page.close();
 }
 
@@ -925,10 +1092,17 @@ async function testGuards(browser, base) {
   await page.evaluate(() => { setReagent('dpd'); setUse('drinking'); });
   await input.uploadFile(path.join(SAMPLES, 'dpd_0p5.png'));
   await page.waitForFunction(() => window.lastReading !== null, { timeout: 8000 });
-  // The reagent is no longer chosen by the operator — it is read off the vial colour — so
-  // there is no "wrong reagent selected" state left to get stale.
-  const auto = await page.evaluate(() => window.lastReading.reagent);
-  check('reagent is detected from the photo, not selected', auto === 'DPD', `detected ${auto}`);
+  // The reagent comes from the tab, and the record must say so — provenance on a
+  // compliance document is not decoration.
+  const prov = await page.evaluate(() => ({
+    reagent: window.lastReading.reagent,
+    source: window.lastReading.reagentSource,
+    cross: window.lastReading.crossCheck,
+  }));
+  check('the record carries the tab the operator selected', prov.reagent === 'DPD', `recorded ${prov.reagent}`);
+  check('the record says the operator selected it', prov.source === 'selected by operator', prov.source);
+  check('the record carries the colour cross-check verdict',
+    ['agree', 'unconfirmed'].includes(prov.cross), `crossCheck=${prov.cross}`);
 
   // Manual zero entry is the ONLY route to a reported zero (a colourless vial is
   // refused), and it must raise the critical interstitial.
@@ -1026,6 +1200,9 @@ async function testGuards(browser, base) {
     await testResultIsFrozen(browser, base);
     await testWarmCastVote(browser, base);
     await testGuards(browser, base);
+    await testWrongTabVeto(browser, base);
+    await testTabSwitchClearsResult(browser, base);
+    await testTypedCardReading(browser, base);
   } finally {
     await browser.close();
     server.close();

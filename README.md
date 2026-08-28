@@ -41,6 +41,27 @@ Only DPD can produce a "within range" verdict. That is deliberate and is covered
 that sweeps every concentration in both use profiles and fails if any OTO reading ever
 bands as `ok`.
 
+## Choosing the test: two tabs, and one thing the app checks for you
+
+The app opens on two tabs — **DPD** and **OTO** — and the tab you select is the only thing
+that decides which chemistry is used, which channel is read, and which scale the number
+comes off. The app never overrides that choice, and switching tabs clears any reading on
+screen, because a result belongs to the test it was taken on.
+
+What the app *does* do is look at the photograph and check that the vial colour matches the
+tab. That check exists for one specific failure: a yellow OTO vial photographed with DPD
+selected. Left unchecked, the DPD pass would run on it, pick its white reference off the
+vial itself, and return a confident free-chlorine number off entirely the wrong scale — with
+every other quality gate passing. So on a clear disagreement the app **refuses to publish a
+number** and tells you which tab it thinks you want. It does not switch tabs for you: what
+is in the vial is your call, not the camera's.
+
+The discriminator is which channel is *darkest*, not a hue threshold, because that survives
+a colour cast. Warming a photo lowers blue, but a pink vial's blue still sits above its
+green; cooling raises blue, but a yellow vial's blue still sits below its green. Where the
+photo cannot settle it either way, the reading still goes through on your selection and the
+record notes that the colour check could not confirm it.
+
 ## How the measurement works
 
 Both reagents use the same idea. The coloured product absorbs light in one band; the app
@@ -101,8 +122,9 @@ an upload cannot bypass a check the camera path applies.
 | Vial is the *other* reagent's colour | Refuses and names the mismatch. |
 | OTO vial absorbs red as well as blue | Refuses. Blue-green means under-acidified, stale, or stabilized-neutral reagent; orange-brown means chlorine in excess. Neither is on the calibration curve. |
 | Transmittance at or below the saturation gate | Reports a **lower bound**, flagged, and asks for a dilution — never the (badly low) number the linear model would give. |
-| OTO timer started but the photo is outside 4:30–10:00 | Refuses, because what OTO measures depends on when you read it. |
-| Reagent switched after a reading | Clears the reading. Different channel, different constant, different species. |
+| Vial colour contradicts the selected tab | Refuses, names which test it looks like, and tells you which tab to switch to. It never switches for you. |
+| Colour present but neither pink nor yellow dominates | Refuses — it will not guess between two chemistries read on different scales. |
+| Tab switched after a reading | Clears the reading. Different channel, different constant, different species. |
 
 The saturation gate is on **transmittance** (sample ÷ reference), not on the raw channel
 value. An absolute code threshold looks camera-robust but is not: across the exposures the
