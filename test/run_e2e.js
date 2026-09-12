@@ -106,6 +106,8 @@ async function runSample(browser, base, m) {
     crossCheck: window.lastReading ? window.lastReading.crossCheck : null,
     reagentSource: window.lastReading ? window.lastReading.reagentSource : null,
     overRange: window.lastReading ? window.lastReading.overRange : null,
+    colourless: window.lastReading ? window.lastReading.colourless : null,
+    critical: document.getElementById('critical').classList.contains('show'),
     caution: document.getElementById('otoCaution').style.display !== 'none',
     cautionText: document.getElementById('otoCaution').textContent,
     saveShown: document.getElementById('saveBtn').style.display !== 'none',
@@ -117,6 +119,27 @@ async function runSample(browser, base, m) {
     check(`${m.file}: reads ${m.expect_mg_l} mg/L`, ok,
       `got ${state.conc === null ? 'no reading' : state.conc.toFixed(3)} (tol ${m.tol}); note="${state.note.slice(0, 110)}"`);
 
+    if (m.colourless) {
+      // A colourless vial on plain white paper IS the chart's 0.0 swatch (2026-09-12): it
+      // reads 0.0 by absence, is banded ZERO, raises the critical alert, and says so.
+      check(`${m.file}: colourless -> ZERO band, critical alert, flagged read-by-absence`,
+        state.colourless === true && /\bzero\b/.test(state.bandClass) && state.critical,
+        `colourless=${state.colourless} class="${state.bandClass}" critical=${state.critical}`);
+      check(`${m.file}: note names the 0.0 (colourless) swatch and asks for card confirmation`,
+        /0\.0 \(colourless\) swatch/.test(state.note) && /confirm zero/i.test(state.note), state.note.slice(0, 160));
+      // A truly colourless vial gives the vote nothing to vote on, so it must abstain. A faint
+      // real tint (card value > 0) may still be seen by the vote; either way it must never
+      // contradict the tab.
+      const okCross = m.card_mg_l > 0 ? ['unconfirmed', 'agree'].includes(state.crossCheck) : state.crossCheck === 'unconfirmed';
+      check(`${m.file}: colour cross-check ${m.card_mg_l > 0 ? 'never contradicts the tab' : 'abstains (unconfirmed)'}`,
+        okCross, `crossCheck=${state.crossCheck}`);
+      check(`${m.file}: recorded against the ${m.reagent.toUpperCase()} tab`,
+        state.reagent === m.reagent.toUpperCase(), `recorded ${state.reagent}`);
+      if (m.reagent === 'oto') check(`${m.file}: reported as TOTAL chlorine, never a pass`,
+        state.species === 'total' && !/\bok\b/.test(state.bandClass), `species=${state.species} class=${state.bandClass}`);
+      await page.close();
+      return state;
+    }
     if (m.reagent === 'oto') {
       check(`${m.file}: reported as TOTAL chlorine`, state.species === 'total', `species=${state.species}`);
       // The invariant: OTO must never render as a pass.
@@ -1102,8 +1125,8 @@ async function testGuards(browser, base) {
   check('the record carries the colour cross-check verdict',
     ['agree', 'unconfirmed'].includes(prov.cross), `crossCheck=${prov.cross}`);
 
-  // Manual zero entry is the ONLY route to a reported zero (a colourless vial is
-  // refused), and it must raise the critical interstitial.
+  // A typed zero must raise the critical interstitial exactly as a photographed
+  // colourless vial does (since 2026-09-12 a colourless vial on white paper reads 0.0).
   await page.evaluate(() => { setReagent('dpd'); setUse('drinking');
     document.getElementById('manualCl').value = '0'; manualResult(); });
   const crit = await page.evaluate(() => ({

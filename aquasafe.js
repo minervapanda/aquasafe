@@ -96,6 +96,10 @@ var OFF_CHART_FIT = 0.12;   // weighted distance from the chart line above which
 // centre band is neither liquid nor white card, or when more than a fifth is and the liquid
 // covers under 15%. A face, a room or a document trips it; a vial on paper does not.
 var SCENE_MAX_FRAC = 0.50, SCENE_WARN_FRAC = 0.20, SAMPLE_MIN_FRAC = 0.15;
+// Blown out = every channel at the sensor's clipping level. The old test (> 250) counted a
+// colourless vial at RGB 253 as glare and a card at 251 as clipped, so a genuine 0.0 sample
+// never reached the colour test (2026-09-12).
+var CLIP = 254;
 var CHARTS = {
   dpd: { id: 'dpd', name: 'DPD', rgb: [[254, 254, 254], [253, 230, 240], [252, 193, 220], [249, 158, 202],
                                        [244, 123, 184], [239, 91, 168], [234, 53, 146], [221, 26, 129]] },
@@ -410,7 +414,7 @@ function analyzePixels(d) {
   var ch0 = rg.channel;
   var hist = new Uint32Array(256), over = 0;
   for (i = 0; i < d.length; i += 4) {
-    if (d[i] > 250 && d[i + 1] > 250 && d[i + 2] > 250) over++;
+    if (d[i] >= CLIP && d[i + 1] >= CLIP && d[i + 2] >= CLIP) over++;
     hist[d[i + ch0]]++;
   }
   var want = Math.max(50, Math.floor(n * 0.10)), acc = 0, thr = 255;
@@ -439,8 +443,8 @@ function analyzePixels(d) {
   // nor a saturated yellow.
   var looksLikeSample = REAGENTS.dpd.isAnalyte(white[0], white[1], white[2]) ||
                         REAGENTS.oto.isAnalyte(white[0], white[1], white[2]);
-  var whiteOK = nW >= 50 && wMin > 170 && wMax <= 250 && !looksLikeSample;
-  var clippedRef = nW >= 50 && wMax > 250;
+  var whiteOK = nW >= 50 && wMin > 170 && wMax < CLIP && !looksLikeSample;
+  var clippedRef = nW >= 50 && wMax >= CLIP;
 
   var minPix = Math.max(50, 0.02 * n);
   var ch = rg.channel;
@@ -468,8 +472,18 @@ function analyzePixels(d) {
              wrongReagent: false, otherName: other.name, otherColour: other.colourWord };
   }
   if (nS < minPix) {
-    return { detected: false, overFrac: over / n, ref: ref, clippedRef: false,
-             wrongReagent: nOther >= minPix, otherName: other.name, otherColour: other.colourWord };
+    if (nOther >= minPix || nScene > SCENE_WARN_FRAC * n) {
+      return { detected: false, overFrac: over / n, ref: ref, clippedRef: false, sceneFrac: nScene / n,
+               wrongReagent: nOther >= minPix, otherName: other.name, otherColour: other.colourWord };
+    }
+    // Colourless on plain white paper = the chart's own 0.0 swatch ("colourless, no tint" on
+    // both printed charts, 2026-09-12). The sample IS the card: transmittance 1.0 in every
+    // channel, exactly where the chart line starts. A frame with no colour that is NOT plain
+    // paper (a grey object, a room) is refused above. No off-channel guard: there is no
+    // absorbance to compare.
+    return { detected: true, colourless: true, sample: white[ch], ref: ref, overFrac: over / n, clamped: false,
+             sample3: white.slice(), white3: white, clippedRef: false, wrongReagent: false,
+             nSample: 0, nWhite: nW, offChannel: null };
   }
   var samp = _median(sV[ch]);
   return { detected: true, sample: samp, ref: ref, overFrac: over / n, clamped: samp > ref,
@@ -777,7 +791,8 @@ function checkROI() {
   var g = gateReasons(s);
   var roi = $('roi'), lab = $('roiLabel'), sh = $('shutter');
   roi.className = 'roi ' + (g.ok ? 'ok' : 'bad');
-  lab.textContent = g.ok ? (R().colourWord.charAt(0).toUpperCase() + R().colourWord.slice(1)) + ' detected — tap the shutter' : g.shortMsg;
+  lab.textContent = g.ok ? (s.colourless ? 'No colour in the vial — reads 0.0; tap the shutter'
+    : (R().colourWord.charAt(0).toUpperCase() + R().colourWord.slice(1)) + ' detected — tap the shutter') : g.shortMsg;
   // aria-disabled, never the disabled property: this runs on a 400ms interval, and
   // disabling a FOCUSED element blurs it, so a keyboard or switch user could be thrown
   // to the top of the document mid-capture. captureTest is deliberately not gated on it
@@ -838,8 +853,8 @@ function gateReasons(s) {
         s.otherColour + '</b> — the <b>' + s.otherName + '</b> colour. Switch to the <b>' +
         s.otherName + '</b> tab above, or re-run the test with the ' + rg.name + ' reagent.' };
     return { ok: false, shortMsg: 'Align the ' + rg.colourWord + ' vial in the outline',
-      longMsg: '<b>No ' + rg.colourWord + ' vial found.</b> Hold the ' + rg.name +
-        ' vial inside the outline with plain white paper behind it, and take the photo again. If the water has no colour at all, read your colour card instead — this app will not report a zero it cannot see.' };
+      longMsg: '<b>No ' + rg.colourWord + ' vial found</b>, and the frame is not plain white paper. Hold the ' + rg.name +
+        ' vial inside the outline with plain white paper behind it, and take the photo again. A vial with no colour at all on plain white paper reads 0.0 — the first swatch on the chart.' };
   }
   if (s.offChannel && s.offChannel.suspect) return { ok: false,
     shortMsg: 'Colour is not a clean yellow — check the reagent',
@@ -1044,7 +1059,7 @@ function finishTest(s, srcEl, w, h) {
   resultCross = s.crossCheck || 'unconfirmed';
   var r = concFromChannel(s.sample, s.ref, dilutionFactor(), undefined, s.sample3, s.white3);
   criticalShown = false;
-  renderResult(r, { s: s.sample, ref: s.ref, s3: s.sample3, w3: s.white3 });
+  renderResult(r, { s: s.sample, ref: s.ref, s3: s.sample3, w3: s.white3, colourless: !!s.colourless });
   stampImage(frame, w, h, r);
   // Suppressed when the reading is critical: #critical takes focus immediately and
   // would preempt the announcement. ackCritical shows the strip once dismissed.
@@ -1121,6 +1136,7 @@ function renderResult(r, px) {
   else if (r.extrapolated) note += ' This is near the top of what the test can measure. Mix half sample with half clean water and test again to check it.';
   // Say plainly where the number came from. A typed reading is the operator's own reading
   // of their card; the app judged it against the standard but did not measure it.
+  if (px && px.colourless) note += ' No ' + rg.colourWord + ' tint was found in the outline, so this is the 0.0 (colourless) swatch of the ' + rg.name + ' chart. Make sure the vial was inside the outline with the reagent added, and confirm zero on the chart in your hand before acting.';
   if (r.manual) note += ' This is the value you typed from your colour card — the app has not measured it.';
   else if (resultCross === 'unconfirmed') note += ' The app could not double-check the vial colour against the ' + rg.name + ' tab on this photo, so the test type is on your word alone.';
   $('clNote').textContent = note;
@@ -1165,7 +1181,7 @@ function renderResult(r, px) {
     concHi: iv ? parseFloat(iv.hi.toFixed(2)) : null,
     concOpen: iv ? !!iv.open : false,
     transmittance: (r.T != null && isFinite(r.T)) ? parseFloat(r.T.toFixed(4)) : null,
-    band: c.band, bandLabel: c.label, manual: !!r.manual,
+    band: c.band, bandLabel: c.label, manual: !!r.manual, colourless: !!(px && px.colourless),
     // Provenance. On a compliance record it matters not just WHICH test was run but on
     // whose word: the operator selected the tab, and the photo either backed that up or
     // could not. 'unconfirmed' is not a failure - it is a reading the colour check
