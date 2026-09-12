@@ -92,6 +92,10 @@ var OTO_CAL_NOTE = 'Read against the TWAD Board chlorine chart, 0.2–3.0 mg/L.'
 // printed charts the operators carry.
 var CHART_MG = [0, 0.2, 0.5, 1, 2, 3, 4, 5], CHART_TOP = 5.0;
 var OFF_CHART_FIT = 0.12;   // weighted distance from the chart line above which a colour is flagged
+// Vial-on-white gate (same rule in every app of the family): refuse when more than half the
+// centre band is neither liquid nor white card, or when more than a fifth is and the liquid
+// covers under 15%. A face, a room or a document trips it; a vial on paper does not.
+var SCENE_MAX_FRAC = 0.50, SCENE_WARN_FRAC = 0.20, SAMPLE_MIN_FRAC = 0.15;
 var CHARTS = {
   dpd: { id: 'dpd', name: 'DPD', rgb: [[254, 254, 254], [253, 230, 240], [252, 193, 220], [249, 158, 202],
                                        [244, 123, 184], [239, 91, 168], [234, 53, 146], [221, 26, 129]] },
@@ -451,11 +455,17 @@ function analyzePixels(d) {
 
   // --- pass 2: segment on WHITE-BALANCED values --------------------------------
   var kR = 255 / white[0], kG = 255 / white[1], kB = 255 / white[2];
-  var sV = [[], [], []], nS = 0, nOther = 0;
+  var sV = [[], [], []], nS = 0, nOther = 0, nScene = 0;
   for (i = 0; i < d.length; i += 4) {
     var nr = d[i] * kR, ng = d[i + 1] * kG, nb = d[i + 2] * kB;
     if (rg.isAnalyte(nr, ng, nb)) { sV[0].push(d[i]); sV[1].push(d[i + 1]); sV[2].push(d[i + 2]); nS++; }
     else if (other.isAnalyte(nr, ng, nb)) nOther++;
+    else if (!(Math.min(nr, ng, nb) > 150 && Math.max(nr, ng, nb) - Math.min(nr, ng, nb) < 30)) nScene++;
+  }
+  if (nS >= minPix && (nScene > SCENE_MAX_FRAC * n || (nScene > SCENE_WARN_FRAC * n && nS < SAMPLE_MIN_FRAC * n))) {
+    return { detected: false, overFrac: over / n, ref: ref, clippedRef: false, notVial: true,
+             sampleFrac: nS / n, sceneFrac: nScene / n,
+             wrongReagent: false, otherName: other.name, otherColour: other.colourWord };
   }
   if (nS < minPix) {
     return { detected: false, overFrac: over / n, ref: ref, clippedRef: false,
@@ -810,6 +820,10 @@ function gateReasons(s) {
         '</b> tab above and photograph it again. If it is a ' + sel.name +
         ' test, check the lighting — a strong colour cast can change how the vial looks.' };
   }
+  if (s.notVial) return { ok: false, shortMsg: 'Not a vial on white paper — fill the outline',
+    longMsg: '<b>This does not look like a vial on white paper.</b> The ' + rg.colourWord + ' liquid is only ' +
+      Math.round(100 * s.sampleFrac) + '% of the frame and ' + Math.round(100 * s.sceneFrac) +
+      '% is something else. Photograph the vial filling the outline against plain white paper, in even light, and take the photo again.' };
   if (s.ambiguous) return { ok: false, shortMsg: 'Cannot tell pink from yellow — move closer',
     longMsg: '<b>The app cannot confirm which test this is.</b> A <b>pink</b> vial is a DPD test and a <b>yellow</b> vial is an OTO test, and they are read in different ways — so before it reports a number it checks that the vial matches the <b>' + rg.name + '</b> tab you selected. It cannot see that clearly here. Move closer so the vial fills the outline, keep plain white paper behind it, and take the photo again.' };
   if (!s.detected) {
