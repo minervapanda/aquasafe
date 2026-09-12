@@ -186,5 +186,6 @@
       "why_not_built": "(1) The app has no DPD No.3 / total-chlorine path, so the pair the document means does not exist here. (2) The OTO field protocol addresses the free-vs-combined question directly and prescribes the better answer: \"For optimizing precise chemical dosing where the distinction between Free Residual Chlorine and Combined Chlorine is critical, the DPD method should be implemented.\" The app already says exactly this in its OTO caveat. (3) The product owner has closed it.",
       "if_it_is_ever_revisited": "The only sound route is DPD No.3 support: a second reading on the same sample, same pink chemistry, same green channel, same 3.778 constant. Never subtract an OTO reading from a DPD one."
     }
-  }
+  },
+  "superseded_by": "chart_calibration.json (2026-09-11): the app now reads the 0-5 mg/L OTO colour chart; the TWAD card table remains in aquasafe.js as OTO_CARD_T for the record only."
 }

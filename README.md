@@ -15,7 +15,7 @@ own site, with two additions: **OTO reagent support** and **PDF report download*
 | Colour | pink | yellow |
 | Channel read | green | blue |
 | Measures | **free** chlorine | **total** chlorine (free + combined) |
-| Calibrated range | 0.1 – 1.0 mg/L, fitted | 0.2 – 3.0 mg/L, read off the TWAD chart |
+| Scale | 0 – 5 mg/L DPD colour chart (8 swatches) | 0 – 5 mg/L OTO colour chart (8 swatches) |
 | Can demonstrate compliance? | **no** — screening only | **no** — see below |
 
 ## The one thing to understand before using OTO
@@ -69,19 +69,26 @@ measures how much darker the vial is than a white reference **in the same photog
 per-channel camera gain and auto white balance cancel out:
 
 ```
-A    = log10(V_white / V_sample)        V = median 8-bit channel value
-mg/L = k × A × dilution
+t    = (R, G, B)_sample ÷ (R, G, B)_white       per-channel ratio to the white card (transmittance)
+mg/L = interpolate(nearest point of t on the chart's colour line) × dilution
 ```
 
-DPD-pink absorbs around 510 nm, so the **green** channel is read with **k = 3.778**, fitted
-through the origin on six photographed Chlor-Test comparator patches spanning 0.1–1.0 mg/L
-(R² = 0.995). That path is numerically identical to the shipped PoolCheck and AquaTreat
-apps, so results stay comparable across the family.
+**Since 2026-09-11 both reagents are read against the two printed 0–5 mg/L colour charts**
+(eight swatches: 0.0 / 0.2 / 0.5 / 1.0 / 2.0 / 3.0 / 4.0 / 5.0) recorded in
+`test/chart_calibration.json`. The vial's transmittance triple is projected onto the
+polyline through the chart's swatch colours (each chart ratioed to its own 0.0 block), with
+channels weighted by how much they move across the chart, and the mg/L is interpolated
+between the two nearest swatches. PoolCheck, AquaTreat and the GPT photo tool run the same
+maths on the same numbers, so results stay comparable across the family. OTO readings are
+still shown as an interval — the two chart swatches the reading sits between.
 
-OTO-yellow absorbs around 438 nm, so the **blue** channel is read, and the reading is
-interpolated between the printed steps of the **TWAD Board chlorine chart** the team uses. See [Calibration](#calibration) for where that number comes from and how far it
-can be trusted — the short version is ±40 %, which is why OTO readings are shown as an
-interval (`0.61 mg/L, provisional range 0.44–0.86`) rather than a bare figure.
+DPD-pink absorbs around 510 nm and OTO-yellow around 438 nm, so the **green** (DPD) and
+**blue** (OTO) channels are the *measuring* channels: that is what decides how the white
+card is found (next section), not the number, which uses all three channels.
+
+The earlier calibrations — DPD **k = 3.778** fitted on a Chlor-Test card, and OTO read off
+the **TWAD Board chart** — remain in `aquasafe.js` for the record and are described under
+[Calibration](#calibration). They no longer compute the number.
 
 ### Why the reference is picked before the colour
 
@@ -133,6 +140,22 @@ app already accepts, a fixed blue floor of 125 fires anywhere between 0.32 and 1
 
 ## Calibration
 
+### Colour charts (current, 2026-09-11)
+
+`test/chart_calibration.json` is the record: the two chart images (`test/field/chart-dpd-2026-09-04.png`,
+`test/field/chart-oto-2026-09-04.jpg`), the swatch RGBs sampled from them, and the projection
+method. The suite pins those numbers to `aquasafe.js` and checks every swatch reads back as
+its own mg/L. Two caveats are recorded there and belong here too:
+
+* The chart images are **illustrations, not a manufacturer's comparator**. They were
+  adopted because they are what is printed and carried.
+* They disagree with the earlier calibrations: the same DPD pink reads ~1.3–1.7× higher
+  than the 3.778 slope above 1 mg/L, and the OTO chart is ~1.7× darker per mg/L than the
+  TWAD card — the Khordha frame below reads **1.97 mg/L** on the chart against 2.73 on the
+  TWAD card. Readings are not comparable with pre-2026-09-11 records.
+
+### Earlier OTO calibration (superseded)
+
 `test/oto_calibration.json` holds the OTO constant, its full derivation, its sources, its
 honest uncertainty and the record of what an adversarial review refuted. A test pins it to
 the constants in `aquasafe.js` so the record and the code cannot drift apart.
@@ -173,9 +196,11 @@ diffuse-transmission setup. Transmittance came out at 0.23. The model computed a
 number and the gate threw it away.
 
 Indian distribution water is routinely dosed to 2–3 mg/L, so a ceiling at 1 mg/L makes
-the tool useless to the people it was built for. That frame now reads **3.79 mg/L, range
-2.3–5.4+**, and lives in `test/field/` as a permanent regression test: if it ever returns
-to reporting a bare lower bound, the suite fails.
+the tool useless to the people it was built for. On the TWAD card that frame read
+**2.73 mg/L**; on the current colour chart it reads **1.97 mg/L** (between the 1.0 and 2.0
+swatches). It lives in `test/field/` as a permanent regression test: if it ever returns to
+reporting a bare lower bound, the suite fails, and the suite prints a WARNING while the
+reading sits below the operator's expected 2–3 mg/L.
 
 The interval is wide, and honestly so — near the asymptote a small change in transmittance
 moves the estimate a lot. That is what the interval is for, and it is why the fix for this
@@ -224,9 +249,10 @@ node run_e2e.js             # or --headful to watch
 node live_smoke.js          # same, against the deployed https site
 ```
 
-The DPD sample images are painted with the **measured** sRGB of the comparator card patches
-the 3.778 constant was fitted to, so the run is a genuine round trip: the app should recover
-the concentration printed on the card. Generated PDFs land in `test/artifacts/` — open them.
+The sample images are painted from the colour charts in `test/chart_calibration.json` (each
+swatch as its ratio to the chart white, on a realistic 223-grey card), so the run is a
+genuine round trip: the app should recover the mg/L printed under the swatch. Generated PDFs
+land in `test/artifacts/` — open them.
 
 ## Files
 

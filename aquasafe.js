@@ -1,10 +1,12 @@
 // Aquasafe — smartphone colorimetry for chlorine, DPD (free) and OTO (total).
 //
-// Lineage: this is PoolCheck's engine generalised over the reagent. The DPD path is
-// numerically identical to the shipped PoolCheck/AquaTreat apps (same green-channel
-// median, same 3.778, same white-reference gate) so results stay comparable across
-// the family. OTO is the new path and reads the BLUE channel, because the OTO
-// holoquinone is yellow and absorbs where DPD-pink transmits.
+// Lineage: this is PoolCheck's engine generalised over the reagent. Since 2026-09-11 the
+// whole family (PoolCheck, AquaTreat, Aquasafe, the GPT's poolcheck_photo.py) reads the
+// vial against the same two 0–5 mg/L COLOUR CHARTS (see CHARTS below), so results stay
+// comparable across the family. The constants that follow are the earlier calibrations,
+// kept for the record and for comparing with pre-2026-09-11 readings; they no longer
+// compute the number. DPD reads the GREEN channel first, OTO the BLUE channel — that
+// still decides how the white card is found (see analyzePixels).
 
 // ---------------------------------------------------------------------------
 // Calibration
@@ -72,7 +74,55 @@ var OTO_FIT_MAX = 3.0;                       // the top printed step
 var OTO_SAT_T = OTO_CARD_T[OTO_CARD_T.length - 1][1];   // past the 3.0 patch, refuse a number
 // Kept only so the DPD-vs-OTO ratio derivation stays documented; not used to compute.
 var OTO_K = 4.0;
-var OTO_CAL_NOTE = 'Read against the TWAD Board chlorine chart, 0.2–3.0 mg/L.';
+var OTO_CAL_NOTE = 'Read against the TWAD Board chlorine chart, 0.2–3.0 mg/L.';   // legacy
+
+// ---------------------------------------------------------------------------
+// COLOUR CHARTS — the current calibration (2026-09-11). Supersedes DPD_K / OTO_CARD_T.
+// ---------------------------------------------------------------------------
+// The vial colour, white-balanced against the card in the same photo, is projected onto
+// the chart's colour line in transmittance space (swatch ÷ the chart's own 0.0 swatch)
+// and the mg/L is interpolated between the two nearest swatches. Per-channel weights are
+// each channel's range across the chart, so red — nearly flat on both — cannot drag a
+// match. Swatch RGBs are the median of each block in the two chart images kept at
+// test/field/chart-dpd-2026-09-04.png and test/field/chart-oto-2026-09-04.jpg;
+// test/chart_calibration.json is the written record and a test pins it to these numbers.
+// NOTE: those chart images are illustrations, not a manufacturer's card. The TWAD card
+// above is ~1.7x lighter per mg/L on OTO; the Khordha field frame reads 1.97 here (1.58
+// in the GPT's poolcheck_photo.py, whose reference pipeline differs) vs 2.73 on the TWAD card. This scale was adopted deliberately so the app agrees with the
+// printed charts the operators carry.
+var CHART_MG = [0, 0.2, 0.5, 1, 2, 3, 4, 5], CHART_TOP = 5.0;
+var OFF_CHART_FIT = 0.12;   // weighted distance from the chart line above which a colour is flagged
+var CHARTS = {
+  dpd: { id: 'dpd', name: 'DPD', rgb: [[254, 254, 254], [253, 230, 240], [252, 193, 220], [249, 158, 202],
+                                       [244, 123, 184], [239, 91, 168], [234, 53, 146], [221, 26, 129]] },
+  oto: { id: 'oto', name: 'OTO', rgb: [[250, 250, 250], [250, 245, 208], [253, 242, 150], [253, 240, 100],
+                                       [253, 237, 56], [254, 237, 5], [253, 220, 2], [246, 195, 4]] }
+};
+(function prepCharts() {
+  Object.keys(CHARTS).forEach(function (id) {
+    var ch = CHARTS[id], w = ch.rgb[0];
+    ch.t = ch.rgb.map(function (c) { return [Math.min(1, c[0] / w[0]), Math.min(1, c[1] / w[1]), Math.min(1, c[2] / w[2])]; });
+    var rng = [0, 1, 2].map(function (c) { var v = ch.t.map(function (t) { return t[c]; }); return Math.max.apply(null, v) - Math.min.apply(null, v); });
+    var mx = Math.max.apply(null, rng); ch.w = rng.map(function (r) { return r / mx; });
+  });
+})();
+// Project a transmittance triple onto the chart's colour line. fit = weighted distance
+// from the line (0 = exactly a chart colour); beyond = past the 5.0 swatch.
+function chartRead(t, id) {
+  var ch = CHARTS[id], P = ch.t, w = ch.w, best = null, i, c;
+  for (i = 0; i < P.length - 1; i++) {
+    var a = P[i], b = P[i + 1], d = [], x = [], l2 = 0, dot = 0;
+    for (c = 0; c < 3; c++) { d[c] = (b[c] - a[c]) * w[c]; x[c] = (t[c] - a[c]) * w[c]; l2 += d[c] * d[c]; dot += x[c] * d[c]; }
+    var u = l2 > 0 ? dot / l2 : 0, uc = Math.min(1, Math.max(0, u)), fit = 0;
+    for (c = 0; c < 3; c++) { var e = x[c] - uc * d[c]; fit += e * e; }
+    fit = Math.sqrt(fit);
+    if (best === null || fit < best.fit - 1e-9) best = { fit: fit, seg: i, frac: uc, u: u };
+  }
+  var mg = CHART_MG[best.seg] + best.frac * (CHART_MG[best.seg + 1] - CHART_MG[best.seg]);
+  return { mg: Math.round(mg * 1000) / 1000, fit: Math.round(best.fit * 10000) / 10000, seg: best.seg,
+           frac: Math.round(best.frac * 1000) / 1000, beyond: (best.seg === P.length - 2 && best.u > 1) };
+}
+function chartBracket(seg) { return [CHART_MG[seg], CHART_MG[seg + 1]]; }
 
 // The visual scale in the PHED "Orthotolidine (OTO) Total Chlorine Method" standard
 // reference — the card the field operator is holding while they use this app. Reporting
@@ -81,17 +131,17 @@ var OTO_CAL_NOTE = 'Read against the TWAD Board chlorine chart, 0.2–3.0 mg/L.'
 // screening aid. Note the printed patches leave gaps (0.5-1.0, 1.5-2.0, 3.0-4.0, 5.0-10),
 // so a reading can legitimately fall between two patches and is reported that way.
 function otoCardBand(c) {
+  // Named on the 0–5 mg/L colour chart's swatches (same steps for DPD and OTO).
   var i;
-  for (i = 0; i < OTO_CARD_T.length; i++) {
-    if (Math.abs(c - OTO_CARD_T[i][0]) < 0.05) return 'the ' + OTO_CARD_T[i][0].toFixed(1) + ' patch';
+  for (i = 0; i < CHART_MG.length; i++) {
+    if (Math.abs(c - CHART_MG[i]) < 0.05) return 'the ' + CHART_MG[i].toFixed(1) + ' swatch';
   }
-  for (i = 0; i < OTO_CARD_T.length - 1; i++) {
-    if (c > OTO_CARD_T[i][0] && c < OTO_CARD_T[i + 1][0]) {
-      return 'between the ' + OTO_CARD_T[i][0].toFixed(1) + ' and ' +
-             OTO_CARD_T[i + 1][0].toFixed(1) + ' patches';
+  for (i = 0; i < CHART_MG.length - 1; i++) {
+    if (c > CHART_MG[i] && c < CHART_MG[i + 1]) {
+      return 'between the ' + CHART_MG[i].toFixed(1) + ' and ' + CHART_MG[i + 1].toFixed(1) + ' swatches';
     }
   }
-  return 'past the ' + OTO_CARD_T[OTO_CARD_T.length - 1][0].toFixed(1) + ' patch';
+  return 'past the ' + CHART_TOP.toFixed(1) + ' swatch';
 }
 
 var reagentId = 'dpd', useId = 'drinking';
@@ -148,7 +198,7 @@ var REAGENTS = {
     id: 'dpd', name: 'DPD', colourWord: 'pink', channel: 1, channelName: 'green',
     species: 'free', speciesLabel: 'Free chlorine', shortLabel: 'Free Cl',
     get k() { return DPD_K; },
-    get fitMax() { return DPD_FIT_MAX; },
+    get fitMax() { return CHART_TOP; },
     get satT() { return DPD_SAT_T; },
     leak: 0,   // DPD's green-channel leak is ~5% and its constant was fitted empirically
     leakLo: 0, leakHi: 0,
@@ -165,7 +215,7 @@ var REAGENTS = {
     id: 'oto', name: 'OTO', colourWord: 'yellow', channel: 2, channelName: 'blue',
     species: 'total', speciesLabel: 'Total chlorine', shortLabel: 'Total Cl',
     get k() { return OTO_K; },
-    get fitMax() { return OTO_FIT_MAX; },
+    get fitMax() { return CHART_TOP; },
     get satT() { return OTO_SAT_T; },
     card: true,                    // read off the TWAD chart rather than a formula
     segClass: 'yellowish',
@@ -413,6 +463,7 @@ function analyzePixels(d) {
   }
   var samp = _median(sV[ch]);
   return { detected: true, sample: samp, ref: ref, overFrac: over / n, clamped: samp > ref,
+           sample3: [_median(sV[0]), _median(sV[1]), _median(sV[2])], white3: white,
            clippedRef: false, wrongReagent: false, nSample: nS, nWhite: nW,
            offChannel: offChannelCheck(rg, sV, wV) };
 }
@@ -495,9 +546,20 @@ function cardBracket(conc) {
   }
   return [OTO_CARD_T[OTO_CARD_T.length - 1][0], null];
 }
-function concFromChannel(sample, ref, dil, rg) {
+function concFromChannel(sample, ref, dil, rg, s3, w3) {
   rg = rg || R();
   var T = ref > 0 ? Math.min(sample / ref, 1) : 1;
+  // Chart path (every photo since 2026-09-11): all three channels against the card.
+  if (s3 && w3 && w3[0] > 0 && w3[1] > 0 && w3[2] > 0) {
+    var t3 = [Math.min(1, s3[0] / w3[0]), Math.min(1, s3[1] / w3[1]), Math.min(1, s3[2] / w3[2])];
+    var rd = chartRead(t3, rg.id);
+    // Past the 5.0 swatch the chart has no more steps, so 5.0 is published as a lower
+    // bound with the dilute-and-retest advice — never a spuriously precise number.
+    return { A: Math.log10(1 / Math.max(T, 1e-6)), T: T, t3: t3, conc: rd.mg * (dil || 1),
+             seg: rd.seg, frac: rd.frac, fit: rd.fit, chart: rg.id,
+             overRange: rd.beyond, clamped: sample > ref, extrapolated: false, adviseDil: rd.beyond };
+  }
+  // Legacy single-channel path (kept for the record; no live caller passes here).
   var overRange = T <= rg.satT;
   // Clamping sample to ref keeps the reading non-negative (a vial brighter than the card
   // is noise, not negative chlorine) — but record it, because silently clamping is how a
@@ -517,13 +579,12 @@ function concFromChannel(sample, ref, dil, rg) {
 // no molar absorptivity for the o-tolidine product is published anywhere) and the
 // device-dependent leak. Both widen sharply near the asymptote, which is the point —
 // a number quoted to two decimals at 3 mg/L would be false precision.
-function concInterval(T, rg, dil) {
-  if (rg.card) {
-    var c = concFromT(T, rg) * (dil || 1), b = cardBracket(c / (dil || 1));
-    if (b[1] == null) return null;
-    return { lo: b[0] * (dil || 1), hi: b[1] * (dil || 1), open: false, card: true };
-  }
-  return null;                                     // DPD is empirically fitted
+function concInterval(r, rg, dil) {
+  // The two chart swatches the reading sits between: the honest interval for a chart
+  // method, since the operator's own chart cannot resolve finer than its steps.
+  if (r == null || r.seg == null) return null;
+  var b = chartBracket(r.seg);
+  return { lo: b[0] * (dil || 1), hi: b[1] * (dil || 1), open: false, card: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -967,9 +1028,9 @@ function finishTest(s, srcEl, w, h) {
 
   resultRgId = reagentId; resultUseId = useId; resultTs = new Date();
   resultCross = s.crossCheck || 'unconfirmed';
-  var r = concFromChannel(s.sample, s.ref, dilutionFactor());
+  var r = concFromChannel(s.sample, s.ref, dilutionFactor(), undefined, s.sample3, s.white3);
   criticalShown = false;
-  renderResult(r, { s: s.sample, ref: s.ref });
+  renderResult(r, { s: s.sample, ref: s.ref, s3: s.sample3, w3: s.white3 });
   stampImage(frame, w, h, r);
   // Suppressed when the reading is critical: #critical takes focus immediately and
   // would preempt the announcement. ackCritical shows the strip once dismissed.
@@ -991,7 +1052,7 @@ function rerender() {
   // and the leak model under a finished reading if the preview had drifted.
   var frz = (lastResult.r.manual || !resultRgId) ? R() : REAGENTS[resultRgId];
   var r = lastResult.px && !lastResult.r.manual
-    ? concFromChannel(lastResult.px.s, lastResult.px.ref, dilutionFactor(), frz)
+    ? concFromChannel(lastResult.px.s, lastResult.px.ref, dilutionFactor(), frz, lastResult.px.s3, lastResult.px.w3)
     : lastResult.r;
   renderResult(r, lastResult.px);
   if (lastCapture) stampImage(lastCapture.frame, lastCapture.w, lastCapture.h, r);
@@ -1012,7 +1073,7 @@ function renderResult(r, px) {
   // the method does not have, right where the number decides whether water is treated
   // as disinfected — so OTO numbers are shown as an interval.
   var iv = (rg.species === 'total' && !r.manual && !r.overRange && r.T != null)
-    ? concInterval(r.T, rg, dilutionFactor()) : null;
+    ? concInterval(r, rg, dilutionFactor()) : null;
   var band = iv
     ? '<div style="font-size:13px;font-weight:600;color:var(--amber);margin-top:2px">provisional range ' +
       fmt(iv.lo, 2) + '–' + fmt(iv.hi, 2) + (iv.open ? '+' : '') + ' mg/L</div>' : '';
@@ -1041,7 +1102,8 @@ function renderResult(r, px) {
       high: 'Above ' + u.idealHigh + ' mg/L — lower the dose and test again.',
       vhigh: 'This is more chlorine than the Indian drinking water standard allows (' + u.max + ' mg/L). Lower the dose and test again.' }[c.band];
   }
-  if (r.overRange) note += ' The colour is too dark to measure, so the real value is higher than this. Mix half sample with half clean water and test again.';
+  if (r.overRange) note += ' The colour is at or past the 5.0 swatch, so the real value is at least this. Mix half sample with half clean water and test again.';
+  else if (r.fit != null && r.fit > OFF_CHART_FIT) note += ' The vial colour sits off the ' + rg.name + ' chart line, so this is approximate — check the lighting and the white paper, and read it against the chart in your hand.';
   else if (r.extrapolated) note += ' This is near the top of what the test can measure. Mix half sample with half clean water and test again to check it.';
   // Say plainly where the number came from. A typed reading is the operator's own reading
   // of their card; the app judged it against the standard but did not measure it.
@@ -1101,7 +1163,8 @@ function renderResult(r, px) {
     temp: tempN, ph: phN, cya: cya,
     hoclFraction: (hoclF !== null ? parseFloat(hoclF.toFixed(3)) : null),
     activeCl: (activeCl !== null ? parseFloat(activeCl.toFixed(2)) : null),
-    cardBand: rg.species === 'total' ? otoCardBand(r.conc) : null,
+    cardBand: r.manual ? null : otoCardBand(r.conc / (dilutionFactor() || 1)),
+    chartSeg: (r.seg != null ? r.seg : null), chartFit: (r.fit != null ? r.fit : null),
     site: (val('siteName') || '').trim(),
     operator: (val('operator') || '').trim(),
     lat: lastGeo ? lastGeo.lat : null, lon: lastGeo ? lastGeo.lon : null,
@@ -1377,7 +1440,7 @@ function buildReportDoc() {
   if (!r.manual && r.chSample != null) {
 
   }
-  if (r.cardBand) method.push(['On the chlorine chart', r.cardBand]);
+  if (r.cardBand) method.push(['On the 0-5 mg/L ' + rg.name + ' colour chart', r.cardBand]);
   method.push(['Dilution', r.dilution > 1 ? 'sample diluted 1:1 with clean water' : 'not diluted']);
   if (r.temp != null) method.push(['Water temperature', fmt(r.temp, 1) + ' °C']);
   if (r.ph != null) method.push(['pH', fmt(r.ph, 2)]);
@@ -1396,12 +1459,11 @@ function buildReportDoc() {
         'chlorine may be anywhere from 0 to ' + fmt(r.conc, 2) + ' mg/L. The ' + r.use.toLowerCase() + ' standard is written ' +
         'against free chlorine, and compliance with it CANNOT be demonstrated from this test. Re-test with DPD No.1 ' +
         'to establish the free residual.' });
-    notes.push({ text: 'Two further reasons not to read this as a compliance figure. First, the OTO constant used here is ' +
-      'PROVISIONAL: no published molar absorptivity exists for the o-tolidine yellow product, so it was reasoned from the ' +
-      'DPD calibration rather than fitted, and carries about +/- 40%. Second, orthotolidine reads LOW against reference ' +
-      'methods even with perfect optics - roughly 90% of true for hypochlorite and inorganic chloramines, and as little ' +
-      'as 50% for organic chloramines and real chlorinated pool water. Both errors point the same way as the total-vs-free ' +
-      'problem: toward false reassurance.' });
+    notes.push({ text: 'Two further reasons not to read this as a compliance figure. First, the value is read off the ' +
+      '0-5 mg/L OTO colour chart (interpolated between its printed swatches), which is a visual scale, not a ' +
+      'photometric calibration. Second, orthotolidine reads LOW against reference methods even with perfect optics - ' +
+      'roughly 90% of true for hypochlorite and inorganic chloramines, and as little as 50% for organic chloramines ' +
+      'and real chlorinated pool water. Both errors point the same way as the total-vs-free problem: toward false reassurance.' });
   } else if (r.species === 'total') {
     notes.push({ heading: 'Interpretation', bold: true, rgb: [0.63, 0, 0],
       text: 'Total chlorine is zero. Because total chlorine is the sum of free and combined chlorine, a total of zero ' +
@@ -1417,7 +1479,7 @@ function buildReportDoc() {
   }
   if (r.overRange) {
     notes.push({ bold: true, rgb: [0.63, 0, 0],
-      text: 'OVER RANGE: the ' + rg.channelName + ' channel was saturated, so ' + fmt(r.conc, 2) +
+      text: 'OVER RANGE: the colour is at or past the 5.0 mg/L swatch of the chart, so ' + fmt(r.conc, 2) +
         ' mg/L is a lower bound, not a measurement. Dilute the sample and re-test with the dilution factor set.' });
   } else if (r.extrapolated) {
     notes.push({ text: 'Above the calibrated range (' + rg.fitMax + ' mg/L undiluted); the value is extrapolated from the ' +
@@ -1447,7 +1509,7 @@ function buildReportDoc() {
     resultLabel: r.manual ? 'TYPED FROM COLOUR CARD - SPECIES NOT KNOWN' : rg.speciesLabel.toUpperCase(),
     resultValue: (r.overRange ? '>' : '') + fmt(r.conc, 2) + ' mg/L',
     resultSub: r.concLo != null
-      ? 'provisional range ' + fmt(r.concLo, 2) + ' - ' + fmt(r.concHi, 2) + ' mg/L (constant is +/- 40%)' : '',
+      ? 'between the ' + fmt(r.concLo, 1) + ' and ' + fmt(r.concHi, 1) + ' mg/L chart swatches' : '',
     verdict: r.bandLabel,
     verdictRGB: VERDICT_RGB[0], verdictInk: VERDICT_RGB[1],
     sections: [{ heading: 'Sample', rows: rows }, { heading: 'Measurement', rows: method }],
@@ -1505,5 +1567,5 @@ if (typeof document !== 'undefined' && document.getElementById('camWrap')) init(
 
 // Exposed for the test harness (Node + headless browser).
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { REAGENTS: REAGENTS, USES: USES, concFromChannel: concFromChannel, classify: classify };
+  module.exports = { REAGENTS: REAGENTS, USES: USES, concFromChannel: concFromChannel, classify: classify, CHARTS: CHARTS, chartRead: chartRead };
 }
