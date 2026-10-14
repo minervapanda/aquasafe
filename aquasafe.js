@@ -1245,7 +1245,9 @@ function loadLog() { try { return JSON.parse(localStorage.getItem(LOGKEY) || '[]
 var _capWarned = false;
 function saveLog(a) {
   if (a.length > 2000) {
-    a.splice(0, a.length - 2000);
+    // Drop the oldest tests that are NOT still waiting to upload: a pending test exists nowhere else.
+    var drop = a.length - 2000;
+    for (var i = 0; i < a.length && drop > 0;) { if (a[i].sync !== 'pending') { a.splice(i, 1); drop--; } else i++; }
     if (!_capWarned) { _capWarned = true; console.warn('Aquasafe: log capped at 2000 records — oldest tests were dropped. Export the CSV to keep them.'); }
   }
   try { localStorage.setItem(LOGKEY, JSON.stringify(a)); return true; }
@@ -1253,6 +1255,14 @@ function saveLog(a) {
 }
 function saveReading() {
   if (!lastReading) return;
+  // A second tap on Save for the same test must not log (or upload) it twice.
+  if (lastReading.id && loadLog().some(function (r) { return r.id === lastReading.id; })) {
+    $('saveBtn').textContent = '✓ Already saved';
+    setTimeout(function () { $('saveBtn').textContent = '＋ Save this test to the log'; }, 1500);
+    return;
+  }
+  // Cloud copy: gives the test an id + upload state, and keeps the stamped photo for upload.
+  if (window.wqtCloud) wqtCloud.stamp(lastReading, lastReading.manual ? null : $('stampCanvas'));
   var log = loadLog(); log.push(lastReading);
   if (saveLog(log)) {
     $('saveBtn').textContent = '✓ Saved to log';
@@ -1287,7 +1297,7 @@ function renderHistory() {
     h += '<tr><td class="daygrp" colspan="6">' + disp + '  —  ' + parts.join('  ·  ') + '</td></tr>';
     rows.forEach(function (r) {
       var t = new Date(r.ts).toLocaleTimeString(APP_LOCALE, { hour: '2-digit', minute: '2-digit' });
-      h += '<tr><td>' + t + '</td><td class="l">' + esc(r.site || '—') + '</td><td>' + esc(r.reagent || 'DPD') + '</td><td><b>' +
+      h += '<tr><td>' + (window.wqtCloud ? wqtCloud.badge(r) : '') + t + '</td><td class="l">' + esc(r.site || '—') + '</td><td>' + esc(r.reagent || 'DPD') + '</td><td><b>' +
         (r.overRange ? '&gt;' : '') + fmt(r.conc, 2) + '</b></td><td class="l">' + esc(r.speciesLabel || 'Free chlorine') +
         '</td><td class="l">' + esc(r.bandLabel || '') + '</td></tr>';
     });
@@ -1331,7 +1341,9 @@ function exportHistory() {
   downloadBlob(blob, 'aquasafe_log_' + new Date().toISOString().slice(0, 10) + '.csv');
 }
 function clearHistory() {
-  if (confirm('Clear all saved tests on this device? Export first if you need them.')) { saveLog([]); renderHistory(); }
+  var waiting = loadLog().filter(function (r) { return r.sync === 'pending'; }).length;
+  if (confirm((waiting ? waiting + ' of these tests have NOT been uploaded to your account yet and will be lost. ' : '') +
+    'Clear all saved tests on this device? Export first if you need them.')) { saveLog([]); renderHistory(); }
 }
 function downloadBlob(blob, name) {
   var url = URL.createObjectURL(blob);
@@ -1591,6 +1603,15 @@ function init() {
   setReagent('dpd'); setUse('drinking');
   clearResult('Capture a test to see the result.');
   loadOperator(); requestGeo(); startCam(); renderHistory();
+  if (window.wqtCloud) {
+    wqtCloud.init({ app: 'aquasafe', kind: 'chlorine_test', logKey: LOGKEY, version: 'aquasafe-v14', mount: 'wqtBar', onLogChanged: renderHistory });
+    var _wqtKey = '';
+    window.addEventListener('wqt-cloud-status', function (e) {
+      // Redraw the history only when an upload state actually changed, not on every status ping.
+      var k = JSON.stringify([e.detail.pending, e.detail.dead, e.detail.signedIn, loadLog().filter(function (r) { return r.sync === 'done'; }).length]);
+      if (k !== _wqtKey) { _wqtKey = k; renderHistory(); }
+    });
+  }
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () { });
 }
 if (typeof document !== 'undefined' && document.getElementById('camWrap')) init();

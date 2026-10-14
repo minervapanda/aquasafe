@@ -163,6 +163,7 @@
   <p>Chlorine field test — photograph the <b>DPD</b> or <b>OTO</b> vial, get mg/L and a PDF report</p>
 </header>
 <div class="wrap">
+  <div id="wqtBar"></div>
   <p class="sr-only" id="capLive" role="status" aria-live="polite" aria-atomic="true"></p>
 
   <div class="card">
@@ -291,6 +292,8 @@
   <button id="ackBtn" onclick="ackCritical()">✓ I acknowledge</button>
 </div>
 
+<script src="lib/supabase-2.45.4.min.js"></script>
+<script src="lib/wqt-cloud.js"></script>
 <script src="pdf.js"></script>
 <script src="aquasafe.js"></script>
 </body>
