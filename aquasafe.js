@@ -1604,7 +1604,7 @@ function init() {
   clearResult('Capture a test to see the result.');
   loadOperator(); requestGeo(); startCam(); renderHistory();
   if (window.wqtCloud) {
-    wqtCloud.init({ app: 'aquasafe', kind: 'chlorine_test', logKey: LOGKEY, version: 'aquasafe-v15', mount: 'wqtBar', onLogChanged: renderHistory });
+    wqtCloud.init({ app: 'aquasafe', kind: 'chlorine_test', logKey: LOGKEY, version: 'aquasafe-v16', mount: 'wqtBar', onLogChanged: renderHistory });
     var _wqtKey = '';
     window.addEventListener('wqt-cloud-status', function (e) {
       // Redraw the history only when an upload state actually changed, not on every status ping.
